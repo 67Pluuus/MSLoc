@@ -1,0 +1,155 @@
+# MSLoc
+
+MSLoc is a two-stage pipeline for localizing AIGC-tampered segments in long videos.
+This repository retains only the inference path used for the best reported result:
+
+1. **MSLoc-PG** uses a DeMamba backbone with boundary-aware four-class prediction to generate coarse proposals.
+2. **MSLoc-PR** uses a TRACE-based MLLM to refine proposal boundaries and generate forensic outputs.
+3. The long-video evaluator reports the final paper metrics.
+
+[![TASLE Dataset](https://img.shields.io/badge/TASLE%20Dataset-ModelScope-624AFF)](https://www.modelscope.cn/datasets/L67plus/TASLE)
+
+Training code, CLoss, binary classification, and the `loc`, `ref`, and `det` ablation paths are intentionally not included.
+
+## Layout
+
+The repository contains code only. Download TASLE and the released checkpoints from [ModelScope](https://www.modelscope.cn/datasets/L67plus/TASLE), then use this sibling-directory layout:
+
+```text
+<workspace>/
+├── MSLoc/
+│   ├── MSLoc-PG/              # proposal generation
+│   ├── MSLoc-PR/              # proposal refinement
+│   ├── scripts/
+│   └── README.md
+└── MSLoc_assets/
+    ├── data/
+    │   └── Tasle-CoT-10K/
+    │       ├── annos/test.json
+    │       ├── videos/
+    │       └── video_frames/
+    ├── DeMamba/               # released backbone/checkpoint assets
+    │   ├── pretrained_weights/xclip-base-patch16/
+    │   └── results/all_Class_4/
+    │       └── best_acc.pth
+    └── Trace/                 # released backbone/checkpoint assets
+        ├── ckpts/clip-vit-large-patch14-336/
+        ├── output/trace_vllava/ref2/
+        └── inference_results/
+```
+
+The code directories follow the paper names `MSLoc-PG` and `MSLoc-PR`. The asset directories retain the released `DeMamba` and `Trace` names for checkpoint compatibility. The default paths assume `MSLoc_assets/` is beside this repository. MSLoc-PR paths can also be overridden with `MSLOC_ASSETS`, `DATA_ROOT`, `MODEL_DIR`, `TEST_ANNO_FILE`, and `VIDEO_DIR`.
+
+## Environments
+
+MSLoc-PG and MSLoc-PR use separate environments.
+
+### Stage 1: MSLoc-PG
+
+```bash
+conda create -n msloc-pg python=3.10 -y
+conda activate msloc-pg
+pip install -r MSLoc-PG/requirements.txt
+```
+
+### Stage 2: MSLoc-PR
+
+MSLoc-PR inference requires CUDA/Linux.
+
+```bash
+conda create -n msloc-pr python=3.10 -y
+conda activate msloc-pr
+pip install -r MSLoc-PR/requirements.txt
+```
+
+Install PyTorch and torchvision wheels matching the local CUDA driver when necessary.
+
+## Best-result inference
+
+### 1. Extract 8-fps frames
+
+Run once before Stage 1:
+
+```bash
+cd MSLoc/MSLoc-PG
+python Preprocess/video2frame.py \
+    --input_root  ../../MSLoc_assets/data/Tasle-CoT-10K/videos \
+    --output_root ../../MSLoc_assets/data/Tasle-CoT-10K/video_frames
+```
+
+The extractor resolves both roots before starting workers and reprocesses incomplete frame directories.
+
+### 2. Generate four-class proposals
+
+```bash
+cd MSLoc/MSLoc-PG
+bash eval.sh
+```
+
+The released classifier uses 2-second windows with 8 sampled frames. Its classes are `0=real`, `1=fake`, `2=real-to-fake`, and `3=fake-to-real`.
+
+The proposal file is written to:
+
+```text
+MSLoc_assets/DeMamba/results/all_Class_4/eval/predictions.json
+```
+
+### 3. Refine boundaries with MSLoc-PR
+
+```bash
+cd MSLoc/MSLoc-PR
+bash scripts/eval/ref2_eval.sh
+```
+
+The launcher defaults to one GPU. For example, use eight GPUs with:
+
+```bash
+NUM_GPUS=8 bash scripts/eval/ref2_eval.sh
+```
+
+Multi-GPU chunks are merged automatically. The final prediction file is:
+
+```text
+MSLoc_assets/Trace/inference_results/ref2_aigc_test/fmt_aigc_test_f40_result.json
+```
+
+An explicit-path example is:
+
+```bash
+MSLOC_ASSETS=/abs/path/to/MSLoc_assets \
+DATA_ROOT=/abs/path/to/Tasle-CoT-10K \
+MODEL_DIR=/abs/path/to/MSLoc_assets/Trace/output/trace_vllava/ref2 \
+TEST_ANNO_FILE=/abs/path/to/predictions.json \
+VIDEO_DIR=/abs/path/to/Tasle-CoT-10K/videos \
+bash scripts/eval/ref2_eval.sh
+```
+
+### 4. Compute the paper metrics
+
+```bash
+cd MSLoc
+python scripts/evaluate_long.py \
+    --gt_file    ../MSLoc_assets/data/Tasle-CoT-10K/annos/test.json \
+    --infer_file ../MSLoc_assets/Trace/inference_results/ref2_aigc_test/fmt_aigc_test_f40_result.json
+```
+
+The evaluator requires predictions for exactly the videos in `test.json`. It reports:
+
+- `Det_Acc`: video-level detection accuracy.
+- `Loc_F1`: temporal-grid F1 at the released 0.01-second resolution.
+- `Loc_IoU`: mean segment-matching F1 over IoU thresholds `{0.1, 0.3, 0.5, 0.7}`.
+
+## Inference data flow
+
+| Artifact | Producer | Consumer |
+| --- | --- | --- |
+| `video_frames/` | `MSLoc-PG/Preprocess/video2frame.py` | `MSLoc-PG/eval.py` |
+| `all_Class_4/eval/predictions.json` | `MSLoc-PG/eval.py` | `MSLoc-PR/trace/eval/evaluate_ref.py` |
+| `ref2_aigc_test/fmt_aigc_test_f40_result.json` | `MSLoc-PR/scripts/eval/ref2_eval.sh` | `scripts/evaluate_long.py` |
+
+The official inference split is `MSLoc_assets/data/Tasle-CoT-10K/annos/test.json`. Training annotations, `test_add.json`, and segment-classification annotations are not used by this retained path.
+
+## License
+
+- MSLoc-PR is built on TRACE and [VideoLLaMA2](https://github.com/DAMO-NLP-SG/VideoLLaMA2); see `MSLoc-PR/VideoLLaMA2-LICENSE`.
+- MSLoc-PG uses the [DeMamba](https://github.com/chenhaoxing/DeMamba) backbone (Apache-2.0).
