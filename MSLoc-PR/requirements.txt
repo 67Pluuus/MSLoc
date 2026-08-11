@@ -1,0 +1,20 @@
+# MSLoc-PR inference environment (TRACE backbone).
+# For CUDA, install torch/torchvision wheels matching your driver if needed.
+torch>=2.0.1,<2.2
+torchvision>=0.15.2,<0.17
+transformers==4.40.1
+sentencepiece==0.1.99
+decord==0.6.0
+imageio==2.34.0
+imageio-ffmpeg==0.4.9
+moviepy==1.0.3
+setuptools==81.0.0
+scenedetect==0.6.3
+numpy==1.26.4
+scikit-learn==1.2.2
+einops==0.6.1
+timm==0.6.13
+safetensors>=0.4.0
+huggingface-hub>=0.23.0
+pillow>=9.0.0
+requests

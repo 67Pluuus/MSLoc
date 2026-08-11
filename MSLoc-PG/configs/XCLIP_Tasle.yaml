@@ -1,0 +1,11 @@
+model: 'XCLIP_DeMamba_4'
+batch_size: 2
+num_workers: 2
+test_json_path: '../../MSLoc_assets/data/Tasle-CoT-10K/annos/test.json'
+dataset_base_path: '../../MSLoc_assets/data/Tasle-CoT-10K/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True
+}

@@ -1,0 +1,1 @@
+Please examine and localize any inconsistencies or obvious signs of forgery in the video, stating their commencement and completion timestamps and provide a succinct explanation.
