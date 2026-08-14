@@ -7,9 +7,10 @@ This repository retains only the inference path used for the best reported resul
 2. **MSLoc-PR** uses a TRACE-based MLLM to refine proposal boundaries and generate forensic outputs.
 3. The long-video evaluator reports the final paper metrics.
 
+[![Project Page](https://img.shields.io/badge/Project-Page-3273DC)](https://debby-0527.github.io/TASLE/)
 [![TASLE Dataset](https://img.shields.io/badge/TASLE%20Dataset-ModelScope-624AFF)](https://www.modelscope.cn/datasets/L67plus/TASLE)
 
-Training code, CLoss, binary classification, and the `loc`, `ref`, and `det` ablation paths are intentionally not included.
+To support ongoing follow-up research, this initial release focuses on the inference and evaluation pipeline required to reproduce our best reported result. We plan to make the remaining training and experimental code publicly available after the extended study is completed. We appreciate the community's interest and understanding.
 
 ## Layout
 
