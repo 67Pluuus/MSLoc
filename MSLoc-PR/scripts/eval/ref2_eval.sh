@@ -70,6 +70,49 @@ echo "=========================================="
 echo "Starting inference..."
 
 # ============================ Parallel inference ============================
+PIDS=()
+
+stop_workers() {
+  local pid
+
+  # Background jobs launched by a non-interactive shell can ignore the
+  # terminal's SIGINT. Terminate only the workers started by this script.
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+    fi
+  done
+
+  # Give Python a brief chance to release CUDA resources cleanly, then make
+  # sure Ctrl+C cannot leave orphaned inference processes behind.
+  sleep 1
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -KILL "${pid}" 2>/dev/null || true
+    fi
+    wait "${pid}" 2>/dev/null || true
+  done
+}
+
+handle_interrupt() {
+  trap - INT TERM
+  echo
+  echo "Interrupted. Stopping all inference processes..."
+  stop_workers
+  echo "All inference processes stopped."
+  exit 130
+}
+
+handle_terminate() {
+  trap - INT TERM
+  echo "Termination requested. Stopping all inference processes..."
+  stop_workers
+  exit 143
+}
+
+trap handle_interrupt INT
+trap handle_terminate TERM
+
 for i in $(seq 0 $(($NUM_GPUS - 1))); do
   echo "Starting process on GPU ${i} (chunk ${i}/${NUM_GPUS})..."
 
@@ -97,6 +140,7 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --bnd_ratio ${BND_RATIO} \
       --bnd_frames ${BND_FRAMES} \
       --seg_frames ${SEG_FRAMES} &
+    PIDS+=("$!")
   else
     LOG_FILE="${OUTPUT_DIR}/gpu${i}.stdout.log"
     PYTHONPATH="${DIR}${PYTHONPATH:+:${PYTHONPATH}}" CUDA_VISIBLE_DEVICES=$i \
@@ -119,10 +163,23 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --chunk_idx $i \
       --quiet_non_master \
       --tqdm_position $i 1>"${LOG_FILE}" &
+    PIDS+=("$!")
   fi
 done
 
-wait
+WORKER_FAILED=0
+for pid in "${PIDS[@]}"; do
+  if ! wait "${pid}"; then
+    WORKER_FAILED=1
+  fi
+done
+
+trap - INT TERM
+
+if [ "${WORKER_FAILED}" -ne 0 ]; then
+  echo "Error: one or more inference processes failed. Merge skipped."
+  exit 1
+fi
 
 echo "All inference processes finished."
 
@@ -203,4 +260,3 @@ echo "Inference finished."
 echo "Result file: ${OUTPUT_DIR}/fmt_${DATASET}_${SPLIT}_f${NUM_FRAME}_result.json"
 echo "- Per-GPU stdout logs: ${OUTPUT_DIR}/gpu*.stdout.log"
 echo "=========================================="
-
