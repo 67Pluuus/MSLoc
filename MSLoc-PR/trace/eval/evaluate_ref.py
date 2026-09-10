@@ -1,5 +1,27 @@
 import copy
 import os
+import sys
+
+# ``trace`` is also the name of a Python standard-library module.  When this
+# file is executed by path, third-party imports (notably torch and its
+# dependencies) may load that module before the local package is discoverable,
+# causing ``'trace' is not a package`` below.  Put the project root first before
+# importing any third-party package.
+current_file_path = os.path.abspath(__file__)
+trace_eval_dir = os.path.dirname(current_file_path)
+trace_dir = os.path.dirname(trace_eval_dir)
+tasle_model_inner_dir = os.path.dirname(trace_dir)
+tasle_model_outer_dir = os.path.dirname(tasle_model_inner_dir)
+
+if tasle_model_inner_dir in sys.path:
+    sys.path.remove(tasle_model_inner_dir)
+sys.path.insert(0, tasle_model_inner_dir)
+
+# Be defensive when a site hook has already imported stdlib ``trace``.
+loaded_trace = sys.modules.get("trace")
+if loaded_trace is not None and not hasattr(loaded_trace, "__path__"):
+    del sys.modules["trace"]
+
 import torch
 try:
     import torch_npu
@@ -11,22 +33,8 @@ except:
 import argparse
 import traceback
 
-import sys
-# Adjust paths for Tasle_Model
-current_file_path = os.path.abspath(__file__)
-# .../trace/eval/evaluate_ref.py -> .../trace/eval -> .../trace -> .../Tasle_Model
-trace_eval_dir = os.path.dirname(current_file_path)
-trace_dir = os.path.dirname(trace_eval_dir)
-tasle_model_inner_dir = os.path.dirname(trace_dir)
-tasle_model_outer_dir = os.path.dirname(tasle_model_inner_dir)
-
 if tasle_model_outer_dir not in sys.path:
     sys.path.append(tasle_model_outer_dir)
-if tasle_model_inner_dir not in sys.path:
-    sys.path.append(tasle_model_inner_dir)
-if trace_dir not in sys.path:
-    sys.path.append(trace_dir)
-sys.path.append('./')
 
 from trace.conversation import conv_templates
 from trace.constants import DEFAULT_MMODAL_TOKEN, MMODAL_TOKEN_INDEX
@@ -617,5 +625,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-
 

@@ -74,7 +74,8 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
   echo "Starting process on GPU ${i} (chunk ${i}/${NUM_GPUS})..."
 
   if [ "$i" -eq 0 ]; then
-    CUDA_VISIBLE_DEVICES=$i python -u ${DIR}/trace/eval/evaluate_ref.py \
+    PYTHONPATH="${DIR}${PYTHONPATH:+:${PYTHONPATH}}" CUDA_VISIBLE_DEVICES=$i \
+      python -u -m trace.eval.evaluate_ref \
       --anno_path "${DIR}/scripts/eval" \
       --anno_file "${TEST_ANNO_FILE}" \
       --video_path "${VIDEO_DIR}" \
@@ -98,7 +99,8 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --seg_frames ${SEG_FRAMES} &
   else
     LOG_FILE="${OUTPUT_DIR}/gpu${i}.stdout.log"
-    CUDA_VISIBLE_DEVICES=$i python -u ${DIR}/trace/eval/evaluate_ref.py \
+    PYTHONPATH="${DIR}${PYTHONPATH:+:${PYTHONPATH}}" CUDA_VISIBLE_DEVICES=$i \
+      python -u -m trace.eval.evaluate_ref \
       --anno_path "${DIR}/scripts/eval" \
       --anno_file "${TEST_ANNO_FILE}" \
       --video_path "${VIDEO_DIR}" \
@@ -201,5 +203,4 @@ echo "Inference finished."
 echo "Result file: ${OUTPUT_DIR}/fmt_${DATASET}_${SPLIT}_f${NUM_FRAME}_result.json"
 echo "- Per-GPU stdout logs: ${OUTPUT_DIR}/gpu*.stdout.log"
 echo "=========================================="
-
 
