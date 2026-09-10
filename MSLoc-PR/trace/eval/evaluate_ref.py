@@ -6,22 +6,26 @@ try:
     from torch_npu.contrib import transfer_to_npu
     print('Using NPU')
 except:
+    # print(e)
     print('Using GPU')
 import argparse
 import traceback
 
 import sys
-# Adjust sys.path so that the `trace` package (located at MSLoc/Trace/trace) is importable.
+# Adjust paths for Tasle_Model
 current_file_path = os.path.abspath(__file__)
-# .../trace/eval/evaluate_ref.py -> .../trace/eval -> .../trace -> .../Trace (repo root)
+# .../trace/eval/evaluate_ref.py -> .../trace/eval -> .../trace -> .../Tasle_Model
 trace_eval_dir = os.path.dirname(current_file_path)
-trace_pkg_dir = os.path.dirname(trace_eval_dir)
-repo_root = os.path.dirname(trace_pkg_dir)
+trace_dir = os.path.dirname(trace_eval_dir)
+tasle_model_inner_dir = os.path.dirname(trace_dir)
+tasle_model_outer_dir = os.path.dirname(tasle_model_inner_dir)
 
-if repo_root not in sys.path:
-    sys.path.append(repo_root)
-if trace_pkg_dir not in sys.path:
-    sys.path.append(trace_pkg_dir)
+if tasle_model_outer_dir not in sys.path:
+    sys.path.append(tasle_model_outer_dir)
+if tasle_model_inner_dir not in sys.path:
+    sys.path.append(tasle_model_inner_dir)
+if trace_dir not in sys.path:
+    sys.path.append(trace_dir)
 sys.path.append('./')
 
 from trace.conversation import conv_templates
@@ -94,10 +98,10 @@ def load_data(args, anno_path, split=None):
     with open(file_path, 'r', encoding='utf-8') as f:
         raw = json.load(f)
 
-    # Accept three input shapes:
-    # 1) {"annotations": [...]}  (COCO-style)
-    # 2) [...]                  (annotations array directly)
-    # 3) Training-data format    (uses `video` instead of `image_id`)
+    # 兼容三类输入：
+    # 1) {"annotations": [...]}  (COCO风格)
+    # 2) [...]                  (直接为annotations数组)
+    # 3) 训练数据格式 (包含video字段而非image_id)
     if isinstance(raw, dict):
         if "video_path" in raw or "video" in raw:
             data = [raw]
@@ -108,8 +112,8 @@ def load_data(args, anno_path, split=None):
     else:
         raise TypeError(f"Unsupported annotation json root type: {type(raw)}")
 
-    # Convert raw / training annotations into the eval format.
-    # Accept both `video_path` (custom) and `video` (training).
+    # 转换训练数据格式/原始格式为评测格式
+    # 兼容 video_path 字段 (用户自定义格式) 以及 video 字段 (训练格式)
     if data and isinstance(data[0], dict):
         needs_conversion = False
         if "image_id" not in data[0]:
@@ -120,24 +124,24 @@ def load_data(args, anno_path, split=None):
             print("Detected training/raw data format, converting to evaluation format...")
             converted_data = []
             for idx, item in enumerate(data):
-                # Copy the original item to keep all fields (source, duration, ...).
+                # 复制原始 item 以保留所有字段，确保输出时能获取到 source, duration 等
                 converted_item = item.copy()
                 
-                # Prefer video_path, fall back to video.
+                # 优先取 video_path，其次 video
                 vid = item.get("video_path") or item.get("video")
                 
-                # Use the index as fallback id.
+                # 确保有 id，如果没有则使用索引
                 item_id = item.get("id")
                 if item_id is None:
                     item_id = idx
 
-                # Fields required by the model.
+                # 补充模型需要的字段
                 converted_item["image_id"] = vid
                 converted_item["id"] = item_id
                 if "caption" not in converted_item:
-                    converted_item["caption"] = ""  # caption is unused at inference time
+                    converted_item["caption"] = ""  # 推理时不需要caption
                 
-                # Carry segments through if available.
+                # 如果有times字段，可以添加segments
                 if "times" in item and item["times"]:
                     converted_item["segments"] = item["times"]
                 elif "segments" in item:
@@ -147,17 +151,26 @@ def load_data(args, anno_path, split=None):
             data = converted_data
             print(f"Converted {len(data)} samples from raw format to evaluation format")
 
+    # Filter for 'fake' type
+    # filtered_data = []
+    # for item in data:
+    #     if item.get('type') == 'fake':
+    #         filtered_data.append(item)
+    
+    # print(f"Filtered {len(data)} -> {len(filtered_data)} samples (type='fake')")
+    # data = filtered_data
+
     if args.debug:
         data = data[:10]
     return data
 
 
 def save_result(args, output_dir, results, split_name='test', format=False):
-    """Persist `results` to disk as a list (the caller has already built the final shape)."""
+    """保存结果：直接保存 results 列表，因为 main 函数已经构建好了最终格式。"""
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Output filename
+    # 输出文件名
     file_name = f'{args.dataset}_{split_name}_f{args.num_frames}_result.json'
     if args.timestamp:
         if args.timestamp_file != '':
@@ -171,7 +184,7 @@ def save_result(args, output_dir, results, split_name='test', format=False):
     if format:
         file_name = 'fmt_' + file_name
 
-    # Save the results list as-is.
+    # 直接保存 results 列表
     with open(os.path.join(output_dir, file_name), 'w') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     return
@@ -196,14 +209,14 @@ def main(args):
     eval_start_time = time.time()
     prompt = read_txt(args.prompt_file)
 
-    # Suppress non-essential logs on every chunk except chunk 0.
+    # quiet控制：仅在chunk0输出普通日志
     is_master = (int(getattr(args, 'chunk_idx', 0)) == 0)
     if getattr(args, 'quiet_non_master', False) and not is_master:
         import builtins
         _orig_print = builtins.print
 
         def _quiet_print(*p_args, **p_kwargs):
-            # Allow explicit force=True to bypass quiet mode.
+            # 允许显式force打印
             if p_kwargs.pop('force', False):
                 return _orig_print(*p_args, **p_kwargs)
             return None
@@ -238,7 +251,9 @@ def main(args):
     print(f"Model Config CLOSS: {closs_status}")
     print(f"Model has closs_tokens: {has_closs_tokens}")
     
+    # conv_mode = 'mistral_instruct'
     conv_mode = 'llama_2'
+    # conv_mode = 'v1'
     print('Initialization Finished')
 
     # load data
@@ -249,14 +264,15 @@ def main(args):
 
     # Deduplicate by video path to avoid redundant inference
     unique_data = {}
-    # Preserve original order.
+    # 保持原始顺序
     unique_list = []
     seen_vids = set()
     
     print(f"Before deduplication: {len(anno_data)} samples")
     
     for item in anno_data:
-        # Prefer video_path / video as the dedup key; fall back to image_id when it looks like a path.
+        # 优先使用 video_path 或 video 作为去重键
+        # 如果没有，再尝试使用 image_id (如果它看起来像文件路径)
         vid = item.get('video_path') or item.get('video')
         
         if not vid:
@@ -264,17 +280,16 @@ def main(args):
             if iid and isinstance(iid, str) and ('.mp4' in iid or '.avi' in iid or '/' in iid):
                 vid = iid
             else:
-                # When image_id is not a path (e.g. a numeric id) we still use it as the
-                # dedup key. It may not perfectly deduplicate but there is no better key.
+                # 如果 image_id 也是流水号，可能无法正确去重，但在没有 video_path 的情况下只能如此
                 vid = iid
         
-        # Keep the item if vid is set and unseen.
+        # 确保 vid 存在且未处理过
         if vid:
             if vid not in seen_vids:
                 seen_vids.add(vid)
                 unique_list.append(item)
         else:
-            # Extremely rare: neither video_path nor image_id is set. Keep the item to be safe.
+            # 极其罕见的情况：没有 video_path 也没有 image_id，保留以防万一
             unique_list.append(item)
     
     if len(unique_list) < len(anno_data):
@@ -298,28 +313,32 @@ def main(args):
 
     results = []
     
-    # Concurrent tqdm bars: one position per chunk.
+    # tqdm并存显示：每个chunk用不同position
     tqdm_position = int(getattr(args, 'tqdm_position', -1))
     if tqdm_position < 0:
         tqdm_position = int(getattr(args, 'chunk_idx', 0))
 
     for item in tqdm(anno_data, position=tqdm_position, leave=True, dynamic_ncols=True):
+        # if item.get('type') != 'fake':
+        #     results.append(item)
+        #     continue
+
         vname = item.get("image_id")
-        # Try the relative path first.
+        # 尝试构建完整路径
         vid_path = os.path.join(video_path, vname)
         if not os.path.exists(vid_path):
-            # If `video_path` is already absolute, use it directly.
+            # 尝试直接使用 video_path 字段（如果是绝对路径）
             if os.path.exists(item.get("video_path", "")):
                 vid_path = item.get("video_path")
             else:
-                # Otherwise, join `video_path` to the configured root.
+                # 尝试拼接 video_path
                 vid_path = os.path.join(video_path, item.get("video_path", ""))
                 if not os.path.exists(vid_path):
                     print(f"Video not found: {vname} / {item.get('video_path')}")
                     continue
 
         duration = item.get("duration")
-        # Probe the video if duration is missing.
+        # 如果 duration 缺失，尝试读取
         if duration is None:
             try:
                 vr = decord.VideoReader(vid_path, ctx=decord.cpu(0))
@@ -328,14 +347,36 @@ def main(args):
                 print(f"Failed to read duration for {vid_path}: {e}")
                 duration = 10000.0 # Fallback
 
-        # Read coarse proposals from Stage-1 output.
+        # 确定待微调的 segments
+        # 优先使用 model_inference 中的 segment
+        # 如果不存在，回退到 annotations (兼容原始数据输入)
         source_segments = []
         if "model_inference" in item and "segment" in item["model_inference"]:
             source_segments = item["model_inference"]["segment"]
         else:
-            print(f"Skip {vid_path}: missing `model_inference.segment`")
-            continue
+            print(item)
+            exit()
+        # elif "annotations" in item:
+        #     for ann in item["annotations"]:
+        #         if "segment" in ann:
+        #             source_segments.append(ann["segment"])
+        # elif "segments" in item:
+        #     source_segments = item["segments"]
 
+        # print(item)
+        # exit()
+        
+        if not source_segments:
+            # print(f"No segments found for {item.get('image_id', 'unknown')}")
+            # 如果没有 segment，可能是没有检测到任何 proposal，此时应输出空结果或保留原样
+            pass
+        
+        # 如果是 Real 数据且没有 segment，通常不需要处理，但为了保持逻辑一致性，
+        
+        # 如果是 Real 数据且没有 segment，通常不需要处理，但为了保持逻辑一致性，
+        # 如果 source_segments 为空且是 fake 数据，可能意味着 Loc 没检测到，Ref 也无法微调。
+        # 如果是 real 数据，source_segments 通常为空。
+        
         model_inference_segments = []
         model_inference_responses = []
         is_fake = (item.get('type') == 'fake')
@@ -354,13 +395,15 @@ def main(args):
             win_s = max(0.0, center - half_len)
             win_e = min(duration, center + half_len)
             
-            # Window must be valid.
+            # 确保窗口有效
             if win_e <= win_s:
                 print(f"Invalid window for {vid_path}: {win_s}-{win_e}")
                 model_inference_segments.append([-99, -99])
                 continue
 
             try:
+                # print(f"Processing video: {vid_path} window: {win_s}-{win_e}")
+                
                 tensor, video_timestamps = process_video_ref_split(
                     vid_path, 
                     processor, 
@@ -461,7 +504,7 @@ def main(args):
                 elif last_timestamps is not None:
                     parsed_segments.append({"timestamp": last_timestamps, "caption": ""})
 
-                # Parse the model output.
+                # 解析结果
                 abs_s, abs_e = -99, -99
                 response_text = ""
                 
@@ -478,9 +521,21 @@ def main(args):
                     model_inference_segments.append([abs_s, abs_e])
                     model_inference_responses.append(response_text)
                 else:
-                    # No prediction -> mark as invalid; will be filtered out below.
+                    # 记录失败或无预测，但在最终输出时会过滤
                     model_inference_segments.append([-99, -99])
                     model_inference_responses.append("")
+                
+                print(win_s, win_e, abs_s, abs_e)
+
+                # if abs_s != -99 and abs_e != -99:
+                #     if abs_e - abs_s < 1:
+                #         model_inference_segments.append([win_s, win_e])
+                #     else:
+                #         model_inference_segments.append([abs_s, abs_e])
+                # else:
+                #     # 记录失败或无预测，但在最终输出时会过滤
+                #     model_inference_segments.append([win_s, win_e])
+                #     # model_inference_segments.append([-99, -99])
                 
                 print(win_s, win_e, abs_s, abs_e)
             except Exception:
@@ -488,12 +543,12 @@ def main(args):
                 print(f'generate for video {vid_path} segment {segment} failed')
                 model_inference_segments.append([-99, -99])
 
-        # Build the output item.
+        # 构建输出 item
         final_output = item.copy()
-        # Keep the original annotations untouched.
+        # 保持原始 annotations 不变
         final_output['annotations'] = item.get("annotations", [])
         
-        # Filter out invalid segments.
+        # 过滤无效片段
         valid_segments = []
         valid_responses = []
         for s, r in zip(model_inference_segments, model_inference_responses):
@@ -513,7 +568,7 @@ def main(args):
             
         final_output['model_inference'] = model_inference
 
-        # Make sure video_path is set on the output.
+        # 确保 video_path 存在
         if 'video_path' not in final_output:
              final_output['video_path'] = item.get("image_id")
         
@@ -554,7 +609,7 @@ if __name__ == "__main__":
     parser.add_argument('--quiet_non_master', action='store_true', help='Only chunk0 prints normal logs (progress bars still show)')
     parser.add_argument('--tqdm_position', type=int, default=-1, help='tqdm position for multi-progress display; default uses chunk_idx')
     
-    # Refinement-specific arguments.
+    # 新增参数
     parser.add_argument('--bnd_ratio', type=float, default=0.2, help='Ratio of boundary region (each side).')
     parser.add_argument('--bnd_frames', type=int, default=16, help='Number of frames to sample from each boundary region.')
     parser.add_argument('--seg_frames', type=int, default=8, help='Number of frames to sample from the event region.')

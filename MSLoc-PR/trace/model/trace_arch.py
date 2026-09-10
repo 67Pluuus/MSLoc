@@ -27,12 +27,12 @@ from .multimodal_encoder.builder import build_vision_tower, build_time_tower, bu
 # ==================== CLoss Projector ====================
 class ClossProjector(nn.Module):
     """
-    Project the LLM hidden state into the Sentence-BERT feature space
-    so it can be used for a contrastive / classification auxiliary loss.
+    将 LLM 的 Hidden State 投影到 Sentence-BERT 的特征空间
+    用于对比学习或分类损失计算
     """
     def __init__(self, llm_hidden_size=4096, text_feat_size=384, hidden_size=1024):
         super().__init__()
-        # LayerNorm to stabilize the input distribution.
+        # 添加 LayerNorm 以稳定输入分布
         self.layer_norm = nn.LayerNorm(llm_hidden_size)
         self.mlp = nn.Sequential(
             nn.Linear(llm_hidden_size, hidden_size),
@@ -40,10 +40,10 @@ class ClossProjector(nn.Module):
             nn.Linear(hidden_size, text_feat_size),
         )
         
-        # Conservative initialization.
+        # 使用保守的初始化策略
         self.apply(self._init_weights)
         
-        # Initialize the last layer so it outputs values close to zero.
+        # 特别处理最后一层，使其输出接近 0
         nn.init.normal_(self.mlp[-1].weight, std=1e-4)
         if self.mlp[-1].bias is not None:
             nn.init.zeros_(self.mlp[-1].bias)
@@ -62,7 +62,7 @@ class ClossProjector(nn.Module):
 
 class ClassFeatureBank(nn.Module):
     """
-    Stores pre-computed Sentence-BERT features for all classes (frozen).
+    预计算并存储所有类别的 Sentence-BERT 特征（冻结）
     """
     def __init__(self, class_features: torch.Tensor, class_names: list = None):
         super().__init__()
@@ -76,8 +76,7 @@ class ClassFeatureBank(nn.Module):
         return self.class_features
 
 
-# Default location of the pre-computed class-name feature file (in MSLoc_assets/Trace/).
-# Override with the CLASS_FEATURE_PATH env var.
+# 默认的预提取类别特征文件路径
 import os as _os
 DEFAULT_CLASS_FEATURE_PATH = _os.environ.get(
     'CLASS_FEATURE_PATH',
@@ -88,60 +87,65 @@ DEFAULT_CLASS_FEATURE_PATH = _os.environ.get(
 
 def load_class_feature_bank_from_file(feature_file_path: str):
     """
-    Load pre-computed class-name features from a .pt file.
-
-    The feature file is produced by `trace/scripts/extract_class_features.py`
-    using the bge-large-en-v1.5 sentence encoder. Loading pre-computed
-    features at training time avoids re-initializing a separate text encoder
-    inside DeepSpeed/FSDP-wrapped training jobs.
-
+    从预先保存的 .pt 文件加载类别特征
+    
+    【重要】这是推荐的方式！
+    特征文件由 extract_class_features.py 脚本使用 bge-large-en-v1.5 模型预先生成。
+    训练时直接加载特征，避免与 DeepSpeed/FSDP 分布式训练框架冲突。
+    
     Args:
-        feature_file_path: Path to the pre-computed `.pt` file.
-
+        feature_file_path: 预计算特征文件路径 (.pt)
+    
     Returns:
-        (ClassFeatureBank, feat_dim)
+        ClassFeatureBank: 包含预计算特征的模块
+        feat_dim: 特征维度
     """
     import os
-
-    # ========== Validate the file path ==========
+    
+    # ========== 严格校验文件路径 ==========
     if not os.path.isfile(feature_file_path):
         raise RuntimeError(
-            f"Class-feature file not found: {feature_file_path}\n"
-            f"Generate it first with:\n"
+            f"CRITICAL ERROR: 类别特征文件不存在！\n"
+            f"要求的路径: {feature_file_path}\n"
+            f"请先运行 extract_class_features.py 脚本生成特征文件！\n"
+            f"\n"
+            f"使用方法:\n"
             f"  python trace/scripts/extract_class_features.py \\\n"
             f"      --bge_model_path /path/to/bge-large-en-v1.5 \\\n"
             f"      --output_path {feature_file_path}"
         )
-
+    
     print(f"========== Loading Pre-computed Class Features ==========")
     print(f"  Feature file: {feature_file_path}")
-
-    # ========== Load the feature file ==========
+    
+    # ========== 加载特征文件 ==========
     try:
         loaded_data = torch.load(feature_file_path, map_location='cpu')
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load class-feature file: {feature_file_path}\n"
-            f"Underlying error: {e}\n"
-            f"Please regenerate the file."
+            f"CRITICAL ERROR: 无法加载类别特征文件！\n"
+            f"路径: {feature_file_path}\n"
+            f"原始错误: {e}\n"
+            f"请检查文件是否损坏，或重新生成特征文件！"
         )
-
-    # ========== Validate the file contents ==========
+    
+    # ========== 校验文件内容 ==========
     required_keys = ['class_features', 'class_names', 'feat_dim', 'model_name']
     for key in required_keys:
         if key not in loaded_data:
             raise RuntimeError(
-                f"Invalid class-feature file: missing required key '{key}'.\n"
-                f"Please regenerate the file with extract_class_features.py."
+                f"CRITICAL ERROR: 特征文件格式不正确！\n"
+                f"缺少必要的键: {key}\n"
+                f"请使用 extract_class_features.py 重新生成特征文件！"
             )
-
-    # Make sure the file was produced with bge-large-en-v1.5
+    
+    # 验证是 bge-large-en-v1.5 模型生成的特征
     model_name = loaded_data.get('model_name', '')
     if 'bge-large-en-v1.5' not in model_name.lower().replace('_', '-').replace(' ', '-'):
         raise RuntimeError(
-            f"Class-feature file was not produced with bge-large-en-v1.5 "
-            f"(found model='{model_name}'). Please regenerate it with "
-            f"bge-large-en-v1.5."
+            f"CRITICAL ERROR: 特征文件不是由 bge-large-en-v1.5 模型生成！\n"
+            f"当前模型: {model_name}\n"
+            f"请使用 bge-large-en-v1.5 模型重新生成特征文件！"
         )
     
     class_features = loaded_data['class_features']  # (num_classes, feat_dim)
@@ -151,14 +155,14 @@ def load_class_feature_bank_from_file(feature_file_path: str):
     pooling_method = loaded_data.get('pooling_method', 'CLS')
     normalized = loaded_data.get('normalized', True)
     
-    # Validate feature dimension
+    # 验证特征维度
     if class_features.shape[-1] != feat_dim:
         raise RuntimeError(
-            f"Class-feature dimension mismatch: file says {feat_dim}, "
-            f"tensor has {class_features.shape[-1]}."
+            f"CRITICAL ERROR: 特征维度不匹配！\n"
+            f"文件记录: {feat_dim}, 实际: {class_features.shape[-1]}"
         )
     
-    # bge-large-en-v1.5 produces 1024-dim features; warn if it differs.
+    # 验证是 bge-large-en-v1.5 的 1024 维特征
     if feat_dim != 1024:
         print(f"  WARNING: Expected feature dim 1024 for bge-large-en-v1.5, got {feat_dim}")
     
@@ -193,10 +197,10 @@ class TraceMetaModel:
 
         if getattr(config, 'closs', False):
             self.closs_tokens = nn.Parameter(torch.randn(3, config.hidden_size) * 1e-4)
-            # ClossProjector and ClassFeatureBank are constructed lazily by initialize_closs_modules.
+            # ClossProjector 和 ClassFeatureBank 将在 initialize_closs_modules 中初始化
             self.closs_projector = None
             self.class_feature_bank = None
-            # Learnable logit scale for CLoss (init to log(10) ~= 2.3)
+            # Learnable logit scale for CLoss (init to log(10) ≈ 2.3)
             self.closs_logit_scale = nn.Parameter(torch.ones([]) * 2.3026)
 
     def get_vision_tower(self):
@@ -255,15 +259,18 @@ class TraceMetaModel:
             bnd_frames = getattr(model_args, 'bnd_frames', 16)
             seg_frames = getattr(model_args, 'seg_frames', 8)
             self.config.num_frames = bnd_frames * 2 + seg_frames
+            # print(f"Auto-set num_frames to {self.config.num_frames} for ref2 mode")
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
         else:
-            # Rebuild mm_projector if the requested type does not match.
+            # Check if we need to rebuild mm_projector
+            # Specifically for ref_projector transition
             if self.config.mm_projector_type == 'ref_projector' and self.mm_projector.__class__.__name__ != 'RefProjector':
+                # print(f"Rebuilding mm_projector: Current type {self.mm_projector.__class__.__name__} does not match requested {self.config.mm_projector_type}. Rebuilding...")
                 self.mm_projector = build_vision_projector(self.config)
             else:
-                # Re-enable gradients in case it was frozen by LoRA.
+                # In case it is frozen by LoRA
                 for p in self.mm_projector.parameters():
                     p.requires_grad = True
 
@@ -280,6 +287,9 @@ class TraceMetaModel:
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
+            # self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+
+            #self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
             # set strict=False to avoid missing key error regarding bert.embeddings.position_ids
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'), strict=False)
 
@@ -288,14 +298,20 @@ class TraceMetaModel:
 
     def initialize_time_modules(self, model_args, pretrained_tokenizer=None, pretrained_embedding_weights=None, dim=4096):
 
+        # pretrained_embedding = self.embed_tokens.weight.data
+        # print(pretrained_embedding)
+
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
 
         if self.get_time_tower() is None:
+            # print('initialize time tower from scarch')
             self.time_tokenizer, self.time_tower = build_time_tower(pretrained_tokenizer, pretrained_embedding_weights=pretrained_embedding_weights, dim=dim)
         else:
+            # print('use existing time tower')
             return
 
         if pretrain_mm_mlp_adapter is not None:
+            # print('load time tower weights from checkpoint')
             if os.path.exists(pretrain_mm_mlp_adapter):
                 is_local = True
                 mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
@@ -308,24 +324,34 @@ class TraceMetaModel:
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
+            # self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+
+            #self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
             # set strict=False to avoid missing key error regarding bert.embeddings.position_ids
             self.time_tower.load_state_dict(get_w(mm_projector_weights, 'time_tower'), strict=True)
             
+            # Check for NaN in loaded weights
             for name, param in self.time_tower.named_parameters():
                 if torch.isnan(param).any() or torch.isinf(param).any():
-                    print(f"ERROR: TimeTower parameter {name} contains NaN or Inf after loading!")
+                    print(f"CRITICAL ERROR: TimeTower parameter {name} contains NaN or Inf after loading!")
 
 
     def initialize_score_modules(self, model_args, tokenizer=None, pretrained_embedding_weights=None, dim=4096):
 
+        # pretrained_embedding = self.embed_tokens.weight.data
+        # print(pretrained_embedding_weights)
+
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
 
         if self.get_score_tower() is None:
+            # print('initialize score tower from scarch')
             self.score_tokenizer, self.score_tower = build_score_tower(tokenizer, pretrained_embedding_weights=pretrained_embedding_weights, dim=dim)
         else:
+            # print('use existing score tower')
             return
 
         if pretrain_mm_mlp_adapter is not None:
+            # print('load score tower weights from checkpoint')
             if os.path.exists(pretrain_mm_mlp_adapter):
                 is_local = True
                 mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
@@ -338,30 +364,33 @@ class TraceMetaModel:
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
+            # self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+
+            #self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
             # set strict=False to avoid missing key error regarding bert.embeddings.position_ids
             self.score_tower.load_state_dict(get_w(mm_projector_weights, 'score_tower'), strict=True)
             
+            # Check for NaN in loaded weights
             for name, param in self.score_tower.named_parameters():
                 if torch.isnan(param).any() or torch.isinf(param).any():
-                    print(f"ERROR: ScoreTower parameter {name} contains NaN or Inf after loading!")
+                    print(f"CRITICAL ERROR: ScoreTower parameter {name} contains NaN or Inf after loading!")
 
     def initialize_closs_modules(self, class_feature_path: str = None, hidden_size: int = 4096):
         """
-        Initialize CLoss modules: ClossProjector and ClassFeatureBank.
-
-        Class-name features are loaded from a pre-computed `.pt` file produced by
-        `extract_class_features.py` using bge-large-en-v1.5. This avoids
-        instantiating a separate text encoder under DeepSpeed/FSDP.
-
+        初始化 CLoss 模块：ClossProjector 和 ClassFeatureBank
+        
+        【重要】从预先计算的特征文件加载类别特征，避免与分布式训练框架冲突！
+        特征文件由 extract_class_features.py 脚本使用 bge-large-en-v1.5 模型预先生成。
+        
         Args:
-            class_feature_path: Path to a pre-computed `.pt` file. If None,
-                falls back to `DEFAULT_CLASS_FEATURE_PATH`.
-            hidden_size: LLM hidden size.
+            class_feature_path: 预计算特征文件路径 (.pt)，默认使用 DEFAULT_CLASS_FEATURE_PATH
+            hidden_size: LLM 隐藏层维度
         """
         if not getattr(self.config, 'closs', False):
             print("CLoss is disabled in config, skipping initialize_closs_modules")
             return
-
+        
+        # 确定特征文件路径
         import os
         if class_feature_path is not None and os.path.isfile(class_feature_path):
             feature_path = class_feature_path
@@ -369,35 +398,40 @@ class TraceMetaModel:
             feature_path = DEFAULT_CLASS_FEATURE_PATH
         else:
             raise RuntimeError(
-                f"Class-feature file not found.\n"
-                f"Tried paths:\n"
-                f"  - argument:        {class_feature_path}\n"
-                f"  - default fallback: {DEFAULT_CLASS_FEATURE_PATH}\n"
-                f"Generate the file first with:\n"
+                f"CRITICAL ERROR: 类别特征文件不存在！\n"
+                f"尝试的路径:\n"
+                f"  - 参数传入: {class_feature_path}\n"
+                f"  - 默认路径: {DEFAULT_CLASS_FEATURE_PATH}\n"
+                f"\n"
+                f"请先运行特征提取脚本生成特征文件:\n"
                 f"  python trace/scripts/extract_class_features.py \\\n"
                 f"      --bge_model_path /path/to/bge-large-en-v1.5 \\\n"
                 f"      --output_path /path/to/class_features_bge.pt"
             )
-
+        
+        # 从预计算特征文件加载（避免与 DeepSpeed/FSDP 冲突）
         print(f"\n{'='*60}")
         print(f"Initializing CLoss modules from pre-computed features")
         print(f"{'='*60}")
-
+        
         self.class_feature_bank, text_feat_dim = load_class_feature_bank_from_file(feature_path)
-
+        
+        # 获取类别信息
         class_names = self.class_feature_bank.class_names
-
+        
+        # 构建 ClossProjector (保留以防万一，但主要使用 closs_head)
         self.closs_projector = ClossProjector(
             llm_hidden_size=hidden_size,
             text_feat_size=text_feat_dim,
             hidden_size=1024
         )
         
-        # Linear classification head: project hidden_states directly to class logits.
+        # 新增：初始化分类头 (Linear Classifier)
+        # 直接将 hidden_states 映射到类别 logits
         self.closs_head = nn.Linear(hidden_size, len(class_names), bias=False)
         nn.init.normal_(self.closs_head.weight, std=0.02)
         
-        # Save class info.
+        # 保存类别信息
         self.class_names = class_names
         self.class_to_idx = {name: idx for idx, name in enumerate(class_names)}
         
@@ -472,7 +506,7 @@ class TraceMetaForCausalLM(ABC):
             print("ERROR: hw is 0, avoiding division by zero")
             hw = 1 # Prevent crash to see what happens
 
-        # Pre-compute time_features.
+        # 提前计算 time_features
         time_features = None
         if video_timestamps is not None: # b t
             video_time_tokens = self.encode_time(video_timestamps) # b t n_t
@@ -504,9 +538,13 @@ class TraceMetaForCausalLM(ABC):
         # v5
         if seperate_time_feature:
             if self.config.mm_projector_type == 'ref_projector':
+                # print("DEBUG: Calling temporal_aggregator for ref_projector...")
                 frames_features = self.temporal_aggregator(frames_features, hw, int(frames_features.shape[2] / hw), time_features=time_features)
+                # print("DEBUG: temporal_aggregator returned.")
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
+                # print("DEBUG: CUDA synchronized after temporal_aggregator.")
+                
                 if torch.isnan(frames_features).any() or torch.isinf(frames_features).any():
                     print("ERROR: frames_features after temporal_aggregator contains NaN or Inf!")
                 return frames_features
@@ -523,6 +561,7 @@ class TraceMetaForCausalLM(ABC):
                 frames_features = self.temporal_aggregator(frames_features, hw, int(frames_features.shape[2] / hw))
             else:
                 frames_features = torch.cat([frames_features, time_features], dim=2) # b t (s + n_t) h
+                # print(frames_features.shape, time_features.shape)
             
             if torch.isnan(frames_features).any() or torch.isinf(frames_features).any():
                 print("ERROR: frames_features after merging time features contains NaN or Inf!")
@@ -540,7 +579,16 @@ class TraceMetaForCausalLM(ABC):
 
     ##################################################################################
 
-    def encode_time(self, times):
+    def encode_time(self, times): 
+
+        ## [
+        #   [[t_1, t_2], [t_3, t_4], [t_5, t_6], ... ],
+        #   [[t_1], [t_2], [t_3]],
+        #   [[t_1, t_2]] 
+        #  ]
+
+        # if not self.get_model().get_time_tower().initialized:
+        #     self.get_model().get_time_tower().update_weights(self.get_model().embed_tokens.weight)
 
         time_tokens = []
         for batch_times in times: # for each batch
@@ -552,12 +600,22 @@ class TraceMetaForCausalLM(ABC):
 
     def encode_score(self, scores): 
 
+        ## [
+        #   [[s1], [s2], [s3]],
+        #   [[], [], []],
+        #   [[s1], [s2]]
+        #  ]
+
+        # if not self.get_model().get_score_tower().initialized:
+        #     self.get_model().get_score_tower().update_weights(self.get_model().embed_tokens.weight)
+
         score_tokens = []
         for batch_scores in scores: # for each batch
             batch_score_tokens = [self.get_model().get_score_tower().encode(s) for s in batch_scores]
             score_tokens.append(batch_score_tokens)
 
         return score_tokens # [[event1-tokens, event2-tokens], ..., [event1-tokens, event2-tokens]]
+
 
     ##################################################################################
 
@@ -600,6 +658,8 @@ class TraceMetaForCausalLM(ABC):
         vision_tower = self.get_vision_tower()
         # NOTE: text-only situation
         if vision_tower is None or X_modalities is None or input_ids.shape[1] == 1:
+            # if past_key_values is not None and vision_tower is not None and Xs is not None and input_ids.shape[1] == 1:
+            #    attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
             new_input_embeds = []
             for batch_idx in range(input_ids.shape[0]):
                 cur_input_ids = input_ids[batch_idx]
@@ -630,11 +690,18 @@ class TraceMetaForCausalLM(ABC):
             return None, attention_mask, past_key_values, new_input_embeds, labels, None, None, None
 
         Xs, keys = X_modalities
+        # print("DEBUG: Calling encode_images_or_videos...")
         X_features = self.encode_images_or_videos(Xs, keys, video_timestamps)
+        # print("DEBUG: encode_images_or_videos returned.")
         
         ##################################################################################
+        # print("DEBUG: Calling encode_time...")
         time_tokens = self.encode_time(times)
+        # print("DEBUG: encode_time returned.")
+        # print("DEBUG: Calling encode_score...")
         score_tokens = self.encode_score(scores)
+        # print("DEBUG: encode_score returned.")
+        # print(time_tokens, torch.where(input_ids == MMODAL_TOKEN_INDEX['TIME']))
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -644,15 +711,43 @@ class TraceMetaForCausalLM(ABC):
         closs_indices = []
         cur_X_idx = 0
 
+        # print(f'{time_tokens}')
+
+        # print(f"DEBUG: Starting loop over batch (size {len(input_ids)})...")
         # replace image/video/audio tokens with pre-computed embeddings
         for batch_idx, cur_input_ids in enumerate(input_ids):
+            # print(f"DEBUG: Processing batch item {batch_idx}...")
+            # cur_X_features = X_features[batch_idx]
 
+            
             cur_time_tokens = torch.cat(time_tokens[batch_idx], dim=0) if len(time_tokens[batch_idx]) > 0 else torch.tensor([], dtype=torch.int)
             cur_score_tokens =torch.cat(score_tokens[batch_idx], dim=0) if len(score_tokens[batch_idx]) > 0 else torch.tensor([], dtype=torch.int)
+            # print(f'{cur_score_tokens} {cur_time_tokens}')
             cur_X_features = X_features[batch_idx]
+            
+            if torch.isnan(cur_X_features).any() or torch.isinf(cur_X_features).any():
+                print(f"CRITICAL ERROR: cur_X_features (batch {batch_idx}) contains NaN or Inf!")
 
+            
+            # cur_X_features = self.encode_images_or_videos([Xs[batch_idx]], [keys[batch_idx]], [video_timestamps[batch_idx]]).squeeze(0)
+            # print(f'{Xs[batch_idx].shape} {cur_X_features.shape} {cur_X_features.device}')
+            
+            # DEBUG: Check time tokens
+            # print(f"DEBUG: batch {batch_idx}, cur_time_tokens shape: {cur_time_tokens.shape}")
+            
+            # print(f"DEBUG: batch {batch_idx}, calling get_time_tower...")
             cur_time_features = self.get_time_tower()(cur_time_tokens.to(cur_X_features.device))
+            if torch.isnan(cur_time_features).any() or torch.isinf(cur_time_features).any():
+                print(f"CRITICAL ERROR: cur_time_features (batch {batch_idx}) contains NaN or Inf!")
+
+            # print(f"DEBUG: batch {batch_idx}, calling get_score_tower...")
             cur_score_features = self.get_score_tower()(cur_score_tokens.to(cur_X_features.device))
+            if torch.isnan(cur_score_features).any() or torch.isinf(cur_score_features).any():
+                print(f"CRITICAL ERROR: cur_score_features (batch {batch_idx}) contains NaN or Inf!")
+
+            # print(cur_score_features.shape)
+
+            # print('finish score')
 
             video_position = torch.where((cur_input_ids == MMODAL_TOKEN_INDEX['VIDEO']) + (cur_input_ids == MMODAL_TOKEN_INDEX['IMAGE']))[0]
             assert len(video_position) == 1, "only have one video inputs!"
@@ -666,15 +761,36 @@ class TraceMetaForCausalLM(ABC):
                 new_attention_masks.append(cur_new_attention_mask)
 
             sync_token_indices = cur_new_input_ids == MMODAL_TOKEN_INDEX['SYNC']
+            # print(f"DEBUG: batch {batch_idx}, calling get_sync_tower...")
             cur_sync_features = self.get_sync_tower()(cur_new_input_ids[sync_token_indices].to(cur_X_features.device))
+            if torch.isnan(cur_sync_features).any() or torch.isinf(cur_sync_features).any():
+                print(f"CRITICAL ERROR: cur_sync_features (batch {batch_idx}) contains NaN or Inf!")
 
             cur_text_input_ids = torch.clamp(cur_new_input_ids, min=0)
+            # print(f"DEBUG: batch {batch_idx}, calling embed_tokens...")
             cur_new_input_embeds = self.get_model().embed_tokens(cur_text_input_ids)
+            
+            if torch.isnan(cur_new_input_embeds).any() or torch.isinf(cur_new_input_embeds).any():
+                print(f"CRITICAL ERROR: cur_new_input_embeds (text embeddings, batch {batch_idx}) contains NaN or Inf!")
 
+            # print(f\"{torch.sum(cur_new_input_ids == MMODAL_TOKEN_INDEX['TIME'])} {cur_time_features.shape} {times[batch_idx]}\")
+            # print(cur_sync_features.shape)
+
+            # Verify shapes before assignment to avoid silent failures or mismatches
+            num_video_tokens = (cur_new_input_ids == MMODAL_TOKEN_INDEX['VIDEO']).sum()
+            if num_video_tokens != cur_X_features.shape[0]:
+                print(f"CRITICAL ERROR: Mismatch video tokens ({num_video_tokens}) vs features ({cur_X_features.shape[0]})")
+            
+            # print(f"DEBUG: batch {batch_idx}, assigning features...")
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['VIDEO']] = cur_X_features
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['TIME']] = cur_time_features
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['SCORE']] = cur_score_features
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['SYNC']] = cur_sync_features
+
+            if torch.isnan(cur_new_input_embeds).any() or torch.isinf(cur_new_input_embeds).any():
+                print(f"CRITICAL ERROR: cur_new_input_embeds (after merging, batch {batch_idx}) contains NaN or Inf!")
+
+            # print(f'{cur_new_input_embeds.shape} {cur_new_input_embeds.device}')
 
             if labels is not None:
                 cur_labels = labels[batch_idx]
@@ -731,6 +847,8 @@ class TraceMetaForCausalLM(ABC):
                 new_time_labels.append(cur_time_labels)
                 new_score_labels.append(cur_score_labels)
         
+        # print("DEBUG: Loop finished.")
+        # assert 1 < 0
         ##################################################################################
         # padding
         # max_len = 2048
@@ -790,7 +908,13 @@ class TraceMetaForCausalLM(ABC):
                 attention_mask = torch.stack(new_attention_masks, dim=0)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
 
+        # print(f'{new_input_embeds.shape}, {new_labels.shape}, {new_time_labels.shape}, {new_score_labels.shape}')
+        # print(f'{new_labels.device}, {torch.where(new_labels != -100)}, {torch.where(new_time_labels != -100)}, {torch.where(new_score_labels != -100)}')
+        # print(new_labels[new_labels != -100])
+        # print(f'prepare end {new_labels.device}')
+
         return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_time_labels, new_score_labels, closs_indices
+        # return None, attention_mask, past_key_values, new_input_embeds, new_labels
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
