@@ -16,4 +16,5 @@ class SyncTower(nn.Module):
     def forward(self, input_ids):
         input_ids = torch.zeros_like(input_ids).to(input_ids.device)
         tokens = self.embed_tokens(input_ids)
-        return tokens
+        return tokens 
+

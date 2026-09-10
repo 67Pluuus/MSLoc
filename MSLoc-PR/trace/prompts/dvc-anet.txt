@@ -1,0 +1,2 @@
+Pinpoint the time intervals of activity events in the video, and provide detailed descriptions for each event.
+

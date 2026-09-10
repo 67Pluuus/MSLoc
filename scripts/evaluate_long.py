@@ -59,6 +59,23 @@ def get_matches(pred_segs, gt_segs, threshold):
 
     return tp, fp, fn
 
+
+def keep_fake_videos(gt_data, infer_data):
+    """Restrict evaluation to GT fake videos and their matching predictions."""
+    fake_gt_data = [
+        item for item in gt_data
+        if str(item.get('type', '')).strip().lower() == 'fake'
+    ]
+    if not fake_gt_data:
+        raise ValueError("Ground-truth JSON contains no type='fake' videos")
+
+    fake_paths = {item['video_path'] for item in fake_gt_data}
+    fake_infer_data = [
+        item for item in infer_data
+        if item.get('video_path') in fake_paths
+    ]
+    return fake_gt_data, fake_infer_data
+
 def evaluate(gt_json_file, infer_json_file, window_size=0.01):
     print(f"Loading GT: {gt_json_file}...")
     with open(gt_json_file, 'r', encoding='utf-8') as f:
@@ -77,7 +94,12 @@ def evaluate(gt_json_file, infer_json_file, window_size=0.01):
     if any(not isinstance(item.get('video_path'), str) for item in infer_data):
         raise ValueError("Every inference record must contain a string video_path")
 
-    print(f"Total GT videos: {len(gt_data)}")
+    total_gt_videos = len(gt_data)
+    gt_data, infer_data = keep_fake_videos(gt_data, infer_data)
+    print(
+        f"Fake-only evaluation: {len(gt_data)}/{total_gt_videos} GT videos; "
+        "real videos are excluded from every metric."
+    )
 
     if window_size <= 0:
         raise ValueError(f"window_size must be positive, got {window_size}")

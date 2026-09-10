@@ -72,3 +72,5 @@ if __name__ == "__main__":
     tokenizer = ScoreTokenizer()
     score_tower = ScoreTower(tokenizer, hidden_dim=10)
     print(score_tower([5.0]))
+
+

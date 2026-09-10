@@ -1,9 +1,11 @@
 import os
 
 from .clip_encoder import CLIPVisionTower
+#########################################################################################
 from .time_encoder import TimeTower, TimeTokenizer
 from .score_encoder import ScoreTower, ScoreTokenizer
 from .sync_encoder import SyncTower
+#########################################################################################
 
 def build_vision_tower(vision_tower_cfg, **kwargs):
     vision_tower = getattr(vision_tower_cfg, 'mm_vision_tower', getattr(vision_tower_cfg, 'vision_tower', None))
@@ -16,6 +18,7 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
 
     return vision_tower
 
+#########################################################################################
 
 def build_time_tower(pretrain_tokenizer, pretrained_embedding_weights, dim):
 
@@ -39,3 +42,6 @@ def build_sync_tower(dim):
     sync_tower = SyncTower(hidden_dim=dim)
 
     return sync_tower
+
+#########################################################################################
+

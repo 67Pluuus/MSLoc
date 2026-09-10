@@ -1,1 +1,3 @@
-from .DeMamba import XCLIP_DeMamba
+from .DeMamba import XCLIP_DeMamba, CLIP_DeMamba
+
+

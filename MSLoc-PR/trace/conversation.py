@@ -9,6 +9,7 @@ from .constants import LOGDIR, NUM_FRAMES
 
 
 class SeparatorStyle(Enum):
+    """Different separator style."""
     SINGLE = auto()
     TWO = auto()
     MPT = auto()
@@ -19,6 +20,7 @@ class SeparatorStyle(Enum):
 
 @dataclasses.dataclass
 class Conversation:
+    """A class that keeps all conversation history."""
     system: str
     roles: List[str]
     messages: List[List[str]]
@@ -96,7 +98,9 @@ class Conversation:
             ret = ret.lstrip(self.sep)
         elif self.sep_style == SeparatorStyle.QWEN:
             ret = ""
+            # 1. Add system prompt
             ret += self.system + self.sep + "\n"
+            # 2. Iterate message
             for i, (role, message) in enumerate(messages):
                 if i == 0:
                     assert message, "first message should not be none"
@@ -104,8 +108,10 @@ class Conversation:
                 if message:
                     if type(message) is tuple:
                         message, _, _ = message
+                    # 2.1 Add role and message
                     ret += role + message + self.sep + "\n"
                 else:
+                    # 2.2 Add generation prompt
                     ret += role
         elif self.sep_style == SeparatorStyle.PLAIN:
             seps = [self.sep, self.sep2]
@@ -174,13 +180,16 @@ class Conversation:
                 if type(msg) is tuple:
                     from decord import VideoReader, cpu
                     import numpy as np
+                    # here video is the file path of input video
                     msg, video, image_process_mode = msg
                     if not return_pil:
                         video_frames.append(video)
                     else:
+                        # read video using decord.VideoReader
                         decord_vr = VideoReader(uri=video, ctx=cpu(0))
                         duration = len(decord_vr)
                         frame_id_list = np.linspace(0, duration-1, NUM_FRAMES, dtype=int)
+                        # convert the extracted image frames into PIL objects
                         all_images = [Image.fromarray(f) for f in decord_vr.get_batch(frame_id_list).asnumpy()]
                         video_frames.extend([self.process_image(image, image_process_mode, return_pil=return_pil) for image in all_images])
         return video_frames
@@ -203,10 +212,12 @@ class Conversation:
                 if type(msg) is tuple:
                     msg, image_or_video, image_process_mode = msg
                     if isinstance(image_or_video, Image.Image):
+                        # image is PIL object
                         img_b64_str = self.process_image(image_or_video, "Default", return_pil=False, image_format='JPEG')
                         img_str = f'<img src="data:image/jpeg;base64,{img_b64_str}" alt="user upload image" />'
                         msg = img_str + msg.replace('<image>', '').strip()
                     else:
+                        # video is file path
                         vid_str = f'<video controls playsinline width="500" style="display: inline-block;" src="./file={image_or_video}"></video><br>'
                         msg = vid_str + msg.replace('<video>', '').strip()
                     ret.append([msg, None])
@@ -445,3 +456,5 @@ conv_templates = {
 
 if __name__ == "__main__":
     print(default_conversation.get_prompt())
+
+

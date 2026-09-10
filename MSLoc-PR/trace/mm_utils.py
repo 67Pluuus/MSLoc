@@ -23,13 +23,13 @@ from .constants import NUM_FRAMES, MAX_FRAMES, NUM_FRAMES_PER_SECOND, MMODAL_IND
 
 def merge_scenes(cut_list, cut_scores, scene_list,num_frames,max_scene_num=4, num_frame_per_scene=8, min_frames_per_scene=30):
     if len(scene_list) == len(cut_list) and len(scene_list) == 0:
-        frame_ids = np.linspace(0, num_frames-1, num_frame_per_scene, dtype=int)
+        frame_ids = np.linspace(0, num_frames-1, num_frame_per_scene, dtype=int)  # only one scene for current video
         return [frame_ids]
 
     scene_list, cut_results = merge_scenes_not_exeed_max_scene_num(cut_list,cut_scores,scene_list, max_scene_num)
 
     prev_cut_point = 0
-    list_of_scene_frames = []
+    list_of_scene_frames = [] 
     for (cur_cut_point, _) in cut_results:
         frame_ids = list(np.linspace(prev_cut_point, cur_cut_point-1, num_frame_per_scene, dtype=int))
         list_of_scene_frames.append(frame_ids)
@@ -49,13 +49,16 @@ def merge_scenes_not_exeed_max_scene_num(cut_list,cut_scores, scene_list, max_sc
         cut_frames = [ele for idx, ele in enumerate(cut_frames) if idx != min_idx]
         cut_scores = [ele for idx, ele in enumerate(cut_scores) if idx != min_idx]
 
+        # merge scene list
         num_scenes = len(scene_list)
         s1 = scene_list[min_idx]
         s2 = scene_list[min_idx+1]
         new_scene = (s1[0], s2[1])
         if min_idx == 0:
+            # merge the first two scenes
             new_scene_list = [new_scene] + scene_list[2:]
         elif min_idx == num_scenes - 1:
+            # merge the last two scenes
             new_scene_list = scene_list[:min_idx-1] + [new_scene]
         else:
             new_scene_list = scene_list[:min_idx] + [new_scene] + scene_list[min_idx+2:]
@@ -65,6 +68,7 @@ def merge_scenes_not_exeed_max_scene_num(cut_list,cut_scores, scene_list, max_sc
 
 
 def split_video_into_scenes(video_path, threshold=27.0, max_scene_num=10, num_frame_per_scene=8):
+    # Open video, create a scene manager, and add a detector.
     video = open_video(video_path)
     stats_manager = StatsManager()
     scene_manager = SceneManager(stats_manager)
@@ -75,7 +79,7 @@ def split_video_into_scenes(video_path, threshold=27.0, max_scene_num=10, num_fr
     cut_list = scene_manager.get_cut_list()
     num_frames = video.duration.get_frames()
     if len(scene_list) == len(cut_list) and len(scene_list) == 0:
-        frame_ids = np.linspace(0, num_frames-1, num_frame_per_scene, dtype=int)
+        frame_ids = np.linspace(0, num_frames-1, num_frame_per_scene, dtype=int)  # only one scene for current video
         return [frame_ids]
     assert len(scene_list) == len(cut_list) + 1, f"inconsistent lengths for scene list ({len(scene_list)}) vs. cut list ({len(cut_list)})"
     cut_frames = [ele.get_frames() for ele in cut_list]
@@ -86,20 +90,23 @@ def split_video_into_scenes(video_path, threshold=27.0, max_scene_num=10, num_fr
         cut_frames = [ele for idx, ele in enumerate(cut_frames) if idx != min_idx]
         cut_scores = [ele for idx, ele in enumerate(cut_scores) if idx != min_idx]
 
+        # merge scene list
         num_scenes = len(scene_list)
         s1 = scene_list[min_idx]
         s2 = scene_list[min_idx+1]
         new_scene = (s1[0], s2[1])
         if min_idx == 0:
+            # merge the first two scenes
             new_scene_list = [new_scene] + scene_list[2:]
         elif min_idx == num_scenes - 1:
+            # merge the last two scenes
             new_scene_list = scene_list[:min_idx-1] + [new_scene]
         else:
             new_scene_list = scene_list[:min_idx] + [new_scene] + scene_list[min_idx+2:]
         scene_list = new_scene_list
         cut_results = list(zip(cut_frames, cut_scores))
     prev_cut_point = 0
-    list_of_scene_frames = []
+    list_of_scene_frames = [] 
     for (cur_cut_point, _) in cut_results:
         frame_ids = list(np.linspace(prev_cut_point, cur_cut_point-1, num_frame_per_scene, dtype=int))
         list_of_scene_frames.append(frame_ids)
@@ -111,6 +118,14 @@ def split_video_into_scenes(video_path, threshold=27.0, max_scene_num=10, num_fr
 
 
 def select_best_resolution(original_size, possible_resolutions):
+    """
+    Selects the best resolution from a list of possible resolutions based on the original size.
+    Args:
+        original_size (tuple): The original size of the image in the format (width, height).
+        possible_resolutions (list): A list of possible resolutions in the format [(width1, height1), (width2, height2), ...].
+    Returns:
+        tuple: The best fit resolution in the format (width, height).
+    """
     original_width, original_height = original_size
     best_fit = None
     max_effective_resolution = 0
@@ -128,6 +143,14 @@ def select_best_resolution(original_size, possible_resolutions):
 
 
 def resize_and_pad_image(image, target_resolution):
+    """
+    Resize and pad an image to a target resolution while maintaining aspect ratio.
+    Args:
+        image (PIL.Image.Image): The input image.
+        target_resolution (tuple): The target resolution (width, height) of the image.
+    Returns:
+        PIL.Image.Image: The resized and padded image.
+    """
     original_width, original_height = image.size
     target_width, target_height = target_resolution
     scale_w = target_width / original_width
@@ -138,6 +161,7 @@ def resize_and_pad_image(image, target_resolution):
     else:
         new_height = target_height
         new_width = min(math.ceil(original_width * scale_h), target_width)
+    # Resize the image
     resized_image = image.resize((new_width, new_height))
     new_image = Image.new('RGB', (target_width, target_height), (0, 0, 0))
     paste_x = (target_width - new_width) // 2
@@ -147,6 +171,14 @@ def resize_and_pad_image(image, target_resolution):
 
 
 def divide_to_patches(image, patch_size):
+    """
+    Divides an image into patches of a specified size.
+    Args:
+        image (PIL.Image.Image): The input image.
+        patch_size (int): The size of each patch.
+    Returns:
+        list: A list of PIL.Image.Image objects representing the patches.
+    """
     patches = []
     width, height = image.size
     for i in range(0, height, patch_size):
@@ -158,6 +190,15 @@ def divide_to_patches(image, patch_size):
 
 
 def get_anyres_image_grid_shape(image_size, grids, patch_size):
+    """
+    Calculate the shape of the image patch grid after the preprocessing for images of any resolution.
+    Args:
+        image_size (tuple): The size of the input image in the format (width, height).
+        grids (str, List[tuple[int]]): Patch segmentation grid.
+        patch_size (int): The size of each image patch.
+    Returns:
+        tuple: The shape of the image patch grid in the format (width, height).
+    """
     if type(grids) is list:
         possible_resolutions = [(x * patch_size, y * patch_size) for x, y in grids]
     else:
@@ -167,6 +208,15 @@ def get_anyres_image_grid_shape(image_size, grids, patch_size):
 
 
 def process_anyres_image(image, grids, patch_size):
+    """
+    Process an image with variable resolutions.
+    Args:
+        image (PIL.Image.Image): The input image to be processed.
+        grids (str, List[tuple[int]]): Patch segmentation grid.
+        patch_size (int): The size of the patches to be extracted.
+    Returns:
+        torch.Tensor: A tensor containing the processed image patches.
+    """
     if type(grids) is list:
         possible_resolutions = [(x * patch_size, y * patch_size) for x, y in grids]
     else:
@@ -216,19 +266,24 @@ def expand2square(pil_img, background_color):
 
 
 def expand2square_numpy(img_np, background_color):
+    # img_np: [H, W, C]
     h, w, c = img_np.shape
     if h == w:
         return img_np
-
+    
     if w > h:
+        # Pad height
         pad_total = w - h
         pad_top = pad_total // 2
+        # pad_bottom = pad_total - pad_top
         new_img = np.full((w, w, c), background_color, dtype=img_np.dtype)
         new_img[pad_top:pad_top+h, :, :] = img_np
         return new_img
     else:
+        # Pad width
         pad_total = h - w
         pad_left = pad_total // 2
+        # pad_right = pad_total - pad_left
         new_img = np.full((h, h, c), background_color, dtype=img_np.dtype)
         new_img[:, pad_left:pad_left+w, :] = img_np
         return new_img
@@ -250,11 +305,24 @@ def process_images(images, image_processor, model_cfg):
 
 
 def process_videos(frames, image_processor, model_cfg):
-    new_frames = image_processor.preprocess(frames, return_tensors='pt')['pixel_values']
+    # this function only used during inference
+    new_frames = image_processor.preprocess(frames, return_tensors='pt')['pixel_values']  # do not pad for video frames
     return new_frames
 
 
 def create_photo_grid(arr, rows=None, cols=None):
+    """
+    Create a photo grid from a 4D numpy array with shape [t, h, w, c].
+
+    Parameters:
+        arr (numpy.ndarray): Input array with shape [t, h, w, c].
+        rows (int): Optional. Number of rows in the grid. If not set, it will be determined based on `cols` or the square root of `t`.
+        cols (int): Optional. Number of columns in the grid. If not set, it will be determined based on `rows` or the square root of `t`.
+
+    Returns:
+        numpy.ndarray: A 3D numpy array representing the photo grid.
+    """
+
     if isinstance(arr, list):
         if isinstance(arr[0], Image.Image):
             arr = np.stack([np.array(img) for img in arr])
@@ -264,7 +332,8 @@ def create_photo_grid(arr, rows=None, cols=None):
             raise ValueError("Invalid input type. Expected list of Images or numpy arrays.")
 
     t, h, w, c = arr.shape
-
+    
+    # Calculate the number of rows and columns if not provided
     if rows is None and cols is None:
         rows = math.ceil(math.sqrt(t))
         cols = math.ceil(t / rows)
@@ -273,18 +342,21 @@ def create_photo_grid(arr, rows=None, cols=None):
     elif cols is None:
         cols = math.ceil(t / rows)
 
+    # Check if the grid can hold all the images
     if rows * cols < t:
         raise ValueError(f"Not enough grid cells ({rows}x{cols}) to hold all images ({t}).")
-
+    
+    # Create the grid array with appropriate height and width
     grid_height = h * rows
     grid_width = w * cols
     grid = np.zeros((grid_height, grid_width, c), dtype=arr.dtype)
-
+    
+    # Fill the grid with images
     for i in range(t):
         row_idx = i // cols
         col_idx = i % cols
         grid[row_idx*h:(row_idx+1)*h, col_idx*w:(col_idx+1)*w, :] = arr[i]
-
+    
     return grid
 
 
@@ -319,26 +391,34 @@ def process_video(
     start_time: float = None,
     end_time: float = None,
 ):
-    """Sample strictly inside the requested window and return window-relative timestamps."""
+    """Load video and sample frames.
+
+    If `start_time/end_time` are provided, frames are sampled STRICTLY within the time window
+    and timestamps are returned in the window coordinate system (i.e. 0 corresponds to start_time).
+    """
 
     def frame_sample(duration, mode='uniform', local_fps=None):
         if duration <= 0:
             raise ValueError(f"Invalid duration for sampling: {duration}")
 
+        # For window sampling, we want EXACTLY `num_frames` frames.
         if mode == 'uniform':
             if duration == 1:
                 return np.zeros(num_frames, dtype=int)
             return np.linspace(0, duration - 1, num_frames, dtype=int)
         elif mode == 'fps':
+            # fps mode is mainly used for long videos. For a window, keep behavior but cap to num_frames.
             assert local_fps is not None
             segment_len = int(max(1, min(local_fps // NUM_FRAMES_PER_SECOND, duration)))
             ids = np.arange(segment_len // 2, duration, segment_len, dtype=int)
             if len(ids) >= num_frames:
                 ids = ids[:num_frames]
             else:
+                # pad by repeating last
                 ids = np.pad(ids, (0, num_frames - len(ids)), mode='edge')
             return ids
         elif mode == 'rand':
+            # split the video into `num_frames` intervals, and sample one from each interval.
             if duration == 1:
                 return np.zeros(num_frames, dtype=int)
             intervals = np.linspace(0, duration - 1, num=num_frames + 1).astype(int)
@@ -350,12 +430,13 @@ def process_video(
         else:
             raise ImportError(f'Unsupported frame sampling mode: {mode}')
 
-
+    
     import time
     t_start = time.time()
     try:
         if isinstance(video_path, str):
             if video_path.endswith('.gif'):
+                # ... (gif logic)
                 video_gif = imageio.get_reader(video_path)
                 duration, local_fps = len(video_gif), 10
                 frame_id_list = frame_sample(duration, mode=sample_scheme, local_fps=local_fps)
@@ -363,7 +444,9 @@ def process_video(
                     frame_id_list = np.linspace(0, duration-1, MAX_FRAMES, dtype=int)
                 video_data = [frame for index, frame in enumerate(video_gif) if index in frame_id_list]
                 video_timestamps = [[index / local_fps] for index, frame in enumerate(video_gif) if index in frame_id_list]
+            # added by lixin4ever, include the support of .webm files from sthsthv2
             elif video_path.endswith('.webm'):
+                # ... (webm logic)
                 video_webm = VideoFileClip(video_path)
                 video_frames = np.array(list(video_webm.iter_frames()))
                 duration, local_fps = len(video_frames), video_webm.fps
@@ -388,6 +471,7 @@ def process_video(
                 if local_fps <= 0 or math.isnan(local_fps) or math.isinf(local_fps):
                     local_fps = 30.0
 
+                # Window sampling support (STRICTLY within [start_time, end_time])
                 if start_time is not None or end_time is not None:
                     st = 0.0 if start_time is None else float(start_time)
                     ed = (duration - 1) / local_fps if end_time is None else float(end_time)
@@ -414,9 +498,12 @@ def process_video(
                     frame_id_list = frame_sample(duration, mode=sample_scheme, local_fps=local_fps)
                     video_timestamps = [[idx / local_fps] for idx in frame_id_list]
 
+                # limit the max input frames
                 if len(frame_id_list) > MAX_FRAMES:
                     frame_id_list = np.linspace(0, duration - 1, MAX_FRAMES, dtype=int)
+                    # timestamps recompute after capping
                     if start_time is not None or end_time is not None:
+                        # if capped (should be rare), keep relative timestamps
                         frame_id_list = frame_id_list.astype(int).tolist()
                         base = frame_id_list[0]
                         video_timestamps = [[(idx - base) / local_fps] for idx in frame_id_list]
@@ -461,6 +548,7 @@ def process_video(
 
     except Exception as e:
         print(f"Error processing video {video_path}: {e}. Returning dummy black frames.")
+        # Dummy fallback
         dummy_frames = [Image.new('RGB', (336, 336), (0, 0, 0)) for _ in range(num_frames)]
         video = processor.preprocess(dummy_frames, return_tensors='pt')['pixel_values']
         video_timestamps = [[0.0] for _ in range(num_frames)]
@@ -478,12 +566,17 @@ def process_video_ref_split(
     end_time: float = None,
     vr=None,
 ):
-    """Sample both boundary regions and the intervening event region separately."""
-
+    """
+    Load video and sample frames with specific strategy:
+    - Boundary parts (bnd_ratio each side): sample bnd_frames each.
+    - Event part (middle 1 - 2*bnd_ratio): sample seg_frames.
+    """
+    
     try:
         if not isinstance(video_path, str):
             raise ValueError("video_path must be a string path")
 
+        # Initialize video reader
         if video_path.endswith('.gif'):
             video_reader = imageio.get_reader(video_path)
             total_frames = len(video_reader)
@@ -491,17 +584,20 @@ def process_video_ref_split(
             is_decord = False
         elif video_path.endswith('.webm'):
             video_webm = VideoFileClip(video_path)
+            # This might be slow for large videos as it iterates all frames
+            # But keeping consistent with process_video
             video_frames_all = np.array(list(video_webm.iter_frames()))
             total_frames = len(video_frames_all)
             fps = video_webm.fps
             is_decord = False
         else:
+            # Use decord
             if vr is not None:
                 decord_vr = vr
             else:
                 ctx = cpu(0)
                 decord_vr = VideoReader(uri=video_path, ctx=ctx)
-
+            
             total_frames = len(decord_vr)
             fps = float(decord_vr.get_avg_fps())
             is_decord = True
@@ -511,6 +607,7 @@ def process_video_ref_split(
         if fps <= 0 or math.isnan(fps) or math.isinf(fps):
             fps = 30.0
 
+        # Determine time window
         if start_time is None:
             start_time = 0.0
         if end_time is None:
@@ -518,13 +615,17 @@ def process_video_ref_split(
 
         start_time = max(0.0, start_time)
         end_time = min((total_frames - 1) / fps, end_time)
-
+        
         if end_time < start_time:
             end_time = start_time
 
         duration = end_time - start_time
-
-
+        
+        # Define segments
+        # Left boundary: [start_time, start_time + bnd_ratio * duration]
+        # Event: [start_time + bnd_ratio * duration, end_time - bnd_ratio * duration]
+        # Right boundary: [end_time - bnd_ratio * duration, end_time]
+        
         t0 = start_time
         t1 = start_time + bnd_ratio * duration
         t2 = end_time - bnd_ratio * duration
@@ -535,17 +636,18 @@ def process_video_ref_split(
             end_f = int(round(ed * fps))
             start_f = max(0, min(start_f, max_f - 1))
             end_f = max(0, min(end_f, max_f - 1))
-
+            
             if num <= 0:
                 return np.array([], dtype=int)
-
+                
             if start_f > end_f:
+                 # Fallback if window is invalid
                  return np.linspace(start_f, start_f, num, dtype=int)
 
             seg_len = end_f - start_f + 1
             if seg_len == 1:
                 return np.full(num, start_f, dtype=int)
-
+                
             return np.linspace(start_f, end_f, num, dtype=int)
 
         idx_left = get_indices(t0, t1, bnd_frames, fps, total_frames)
@@ -553,9 +655,11 @@ def process_video_ref_split(
         idx_right = get_indices(t2, t3, bnd_frames, fps, total_frames)
 
         frame_id_list = np.concatenate([idx_left, idx_event, idx_right]).astype(int)
-
+        
+        # Get timestamps relative to start_time
         video_timestamps = [[(idx / fps) - start_time] for idx in frame_id_list]
-
+        
+        # Load frames
         if is_decord:
             try:
                 video_data = decord_vr.get_batch(frame_id_list).numpy()
@@ -564,21 +668,30 @@ def process_video_ref_split(
         else:
             if video_path.endswith('.gif'):
                 video_data = [frame for index, frame in enumerate(video_reader) if index in frame_id_list]
+                # Handle case where frame_id_list has duplicates or out of order if gif reader is sequential?
+                # imageio reader is iterable. Better to read all if small or seek.
+                # Re-reading for simplicity as gif usually small.
+                # Actually above logic for gif in process_video reads all then filters.
+                # Let's do same.
+                # video_data is list of numpy arrays
             elif video_path.endswith('.webm'):
                 video_data = video_frames_all[frame_id_list]
 
+        # Preprocess
         if aspect_ratio == 'pad':
+            # Optimized version using numpy
             background_color = tuple(int(x*255) for x in processor.image_mean)
-
+            
             images_np = []
             for i in range(len(video_data)):
                 frame = video_data[i]
                 if isinstance(frame, torch.Tensor):
                     frame = frame.numpy()
                 images_np.append(expand2square_numpy(frame, background_color))
-
+            
             video = processor.preprocess(images_np, return_tensors='pt')['pixel_values']
         else:
+            # Optimized version
             images_np = [f.numpy() if isinstance(f, torch.Tensor) else f for f in video_data]
             video = processor.preprocess(images_np, return_tensors='pt')['pixel_values']
 
@@ -633,6 +746,7 @@ def tokenizer_MMODAL_token(prompt, tokenizer, MMODAL_token_index=IMAGE_TOKEN_IND
         raise ValueError(f'Unsupported tensor type: {return_tensors}')
     return input_ids
 
+####################################################################################################################################################################
 def tokenizer_MMODAL_token_all(prompt, tokenizer, return_tensors=None):
 
     pattern = '|'.join(map(re.escape, DEFAULT_MMODAL_TOKEN.values()))
@@ -657,6 +771,7 @@ def tokenizer_MMODAL_token_all(prompt, tokenizer, return_tensors=None):
             return torch.tensor(input_ids, dtype=torch.long)
         raise ValueError(f'Unsupported tensor type: {return_tensors}')
     return input_ids
+####################################################################################################################################################################
 
 
 def get_model_name_from_path(model_path):
@@ -682,7 +797,7 @@ class KeywordsStoppingCriteria(StoppingCriteria):
             self.keyword_ids.append(torch.tensor(cur_keyword_ids))
         self.tokenizer = tokenizer
         self.start_len = input_ids.shape[1]
-
+    
     def call_for_batch(self, output_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
         offset = min(output_ids.shape[1] - self.start_len, self.max_keyword_len)
         output_ids = output_ids[output_ids < self.tokenizer.vocab_size]
@@ -695,9 +810,11 @@ class KeywordsStoppingCriteria(StoppingCriteria):
             if keyword in outputs:
                 return True
         return False
-
+    
     def __call__(self, output_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
         outputs = []
         for i in range(output_ids.shape[0]):
             outputs.append(self.call_for_batch(output_ids[i].unsqueeze(0), scores))
         return all(outputs)
+
+

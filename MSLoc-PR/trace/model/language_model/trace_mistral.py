@@ -1,9 +1,24 @@
+# Adopted from: https://github.com/haotian-liu/LLaVA. Below is the original copyright:
+#    Copyright 2023 Haotian Liu
+#
+#    Licensed under the Apache License, Version 2.0 (the "License");
+#    you may not use this file except in compliance with the License.
+#    You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS,
+#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#    See the License for the specific language governing permissions and
+#    limitations under the License.
 
 
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Any
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 from torch.nn import CrossEntropyLoss
 
 from transformers import (AutoConfig, AutoModelForCausalLM, MistralConfig,
@@ -12,6 +27,34 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
 from ..trace_arch import TraceMetaModel, TraceMetaForCausalLM
+
+
+class LMHeadBackward(torch.autograd.Function):
+    # Skip the sign operation since it has no gradient.
+
+    @staticmethod
+    def forward(ctx: Any, logits: Tensor):
+        return logits
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: Tensor):
+        grad_output[:, :, :-1] = 0
+        return grad_output
+
+
+class LMEmbedBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, embeddings: Tensor):
+        return embeddings
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: Tensor):
+        grad_output[:, :-1] = 0
+        return grad_output
+
+
+def lm_embed_hook(module, input, output):
+    output = LMEmbedBackward.apply(output)
 
 
 class TraceMistralConfig(MistralConfig):
@@ -48,6 +91,10 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
 
         self.post_init()
 
+    def initialize_embed_and_heads(self, model_args, tokenizer):
+        tokenizer.add_tokens(['<sync>'], special_tokens=True)
+        self.resize_token_embeddings(len(tokenizer))
+
     def get_model(self):
         return self.model
 
@@ -67,10 +114,14 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
         scores: Optional[List[List[List[float]]]] = None,
         video_timestamps: Optional[List[List[List[float]]]] = None,
         heads: Optional[List[int]] = None,
+        closs_input_ids: Optional[torch.LongTensor] = None,
+        all_class_input_ids: Optional[torch.LongTensor] = None,
+        closs_labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        closs_indices = None
         if inputs_embeds is None:
             (
                 input_ids,
@@ -80,6 +131,7 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
                 labels,
                 time_labels,
                 score_labels,
+                closs_indices,
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 attention_mask,
@@ -139,6 +191,59 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
                 loss.append(loss_fct(shift_logits, shift_labels))
             loss = sum(loss)
 
+            # ==================== CLoss: classification on special tokens ====================
+            if (getattr(self.config, 'closs', False)
+                    and closs_labels is not None
+                    and closs_indices is not None):
+                closs_head = self.get_model().get_closs_head()
+                if closs_head is None:
+                    raise RuntimeError(
+                        "closs_head is None but closs is enabled. "
+                        "Call model.initialize_closs_modules() before training."
+                    )
+
+                # 1. Pull the hidden states of the 3 special tokens.
+                closs_features = []
+                valid_mask = []
+                for b, idx in enumerate(closs_indices):
+                    if idx != -1 and idx + 3 <= hidden_states.shape[1]:
+                        closs_features.append(hidden_states[b, idx:idx + 3, :])  # 3 x H
+                        valid_mask.append(True)
+                    else:
+                        closs_features.append(torch.zeros(
+                            3, hidden_states.shape[-1],
+                            device=hidden_states.device, dtype=hidden_states.dtype))
+                        valid_mask.append(False)
+                closs_features = torch.stack(closs_features)  # B x 3 x H
+
+                # 2. Classification logits.
+                logits_closs = closs_head(closs_features)        # B x 3 x C
+                B, N, C = logits_closs.shape
+                logits_flat = logits_closs.view(-1, C)            # (B*3) x C
+                targets_flat = closs_labels.view(-1).to(logits_closs.device)
+
+                valid_mask_tensor = torch.tensor(valid_mask, device=logits_closs.device)
+                valid_mask_tensor = valid_mask_tensor.unsqueeze(1).expand(-1, 3).reshape(-1)
+                target_mask = (targets_flat != -100) & valid_mask_tensor
+
+                if target_mask.sum() > 0:
+                    closs_loss = CrossEntropyLoss()(
+                        logits_flat[target_mask], targets_flat[target_mask])
+                    if torch.isnan(closs_loss).any() or torch.isinf(closs_loss).any():
+                        closs_loss = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
+                    loss = loss + closs_loss
+                    self.last_closs = closs_loss.detach().item()
+
+                    self._closs_log_step = getattr(self, '_closs_log_step', 0) + 1
+                    with torch.no_grad():
+                        pred = logits_flat[target_mask].argmax(dim=-1)
+                        gt = targets_flat[target_mask]
+                        acc = (pred == gt).float().mean().item()
+                        print(f"[CLoss] step={self._closs_log_step}, "
+                              f"loss={closs_loss.item():.4f}, acc={acc:.4f}, "
+                              f"valid_samples={target_mask.sum().item()}")
+                else:
+                    self.last_closs = 0.0
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -192,7 +297,7 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
                 attention_mask,
                 past_key_values,
                 inputs_embeds,
-                _, _, _,
+                _, _, _, _,
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids=inputs,
                 attention_mask=attention_mask,
@@ -228,6 +333,7 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
         if scores is not None:
             _inputs['scores'] = scores
         if heads is not None:
+            # Switch the LM head when encountering <sync>.
             if "input_ids" in _inputs:
                 new_tokens = _inputs["input_ids"][:, -1]
                 for batch_idx, new_token in enumerate(new_tokens):
@@ -239,3 +345,5 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
 
 AutoConfig.register("trace_mistral", TraceMistralConfig)
 AutoModelForCausalLM.register(TraceMistralConfig, TraceMistralForCausalLM)
+
+

@@ -1,7 +1,7 @@
 # MSLoc
 
 MSLoc is a two-stage pipeline for localizing AIGC-tampered segments in long videos.
-This repository retains only the inference path used for the best reported result:
+The inference entry points and their behavior are synchronized with `MSLoc_ori`:
 
 1. **MSLoc-PG** uses a DeMamba backbone with boundary-aware four-class prediction to generate coarse proposals.
 2. **MSLoc-PR** uses a TRACE-based MLLM to refine proposal boundaries and generate forensic outputs.
@@ -10,7 +10,7 @@ This repository retains only the inference path used for the best reported resul
 [![Project Page](https://img.shields.io/badge/Project-Page-3273DC)](https://debby-0527.github.io/TASLE/)
 [![TASLE Dataset](https://img.shields.io/badge/TASLE%20Dataset-ModelScope-624AFF)](https://www.modelscope.cn/datasets/L67plus/TASLE)
 
-To support ongoing follow-up research, this initial release focuses on the inference and evaluation pipeline required to reproduce our best reported result. We plan to make the remaining training and experimental code publicly available after the extended study is completed. We appreciate the community's interest and understanding.
+The restored inference code includes the original `loc`, `ref`, `ref2`, and `det` paths. The original implementation behavior is retained as-is.
 
 ## Layout
 
@@ -95,18 +95,19 @@ The proposal file is written to:
 MSLoc_assets/DeMamba/results/all_Class_4/eval/predictions.json
 ```
 
-### 3. Refine boundaries with MSLoc-PR
+### 3. Run TRACE/MSLoc-PR inference
+
+Use the entry point matching the checkpoint and experiment:
 
 ```bash
 cd MSLoc/MSLoc-PR
-bash scripts/eval/ref2_eval.sh
+bash scripts/eval/loc_eval.sh    # plain end-to-end Trace, full-video input
+bash scripts/eval/ref_eval.sh    # ref checkpoint, proposal-conditioned input
+bash scripts/eval/ref2_eval.sh   # ref2/MSLoc-PR, proposal-conditioned input
+bash scripts/eval/det_eval.sh    # binary detection path
 ```
 
-The launcher defaults to one GPU. For example, use eight GPUs with:
-
-```bash
-NUM_GPUS=8 bash scripts/eval/ref2_eval.sh
-```
+These launchers retain the original `MSLoc_ori` configuration and use eight GPUs.
 
 Multi-GPU chunks are merged automatically. The final prediction file is:
 

@@ -1,47 +1,56 @@
 #!/bin/bash
 
+# =============================================================================
+# ref2_eval.sh - run inference of the `ref2` model.
+# - Reads the proposal JSON (TEST_ANNO_FILE).
+# - Loads the ref2-finetuned model.
+# - Writes refined localization results.
+# =============================================================================
 
 set -e
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-PR_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
-export PYTHONPATH="$PR_DIR:${PYTHONPATH:-}"
-MSLOC_ROOT=$(cd "$PR_DIR/.." && pwd)
+TRACE_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
+MSLOC_ROOT=$(cd "$TRACE_DIR/.." && pwd)
 MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_assets" && pwd)"}
 DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 
+# ============================ Configurable parameters ============================
+DIR="$TRACE_DIR"
 MODEL_DIR=${MODEL_DIR:-"$MSLOC_ASSETS/Trace/output/trace_vllava/ref2"}
 
-
+TASK='dvc'
 DATASET='aigc'
 SPLIT='test'
 
+# Proposal JSON for inference
 TEST_ANNO_FILE=${TEST_ANNO_FILE:-"$MSLOC_ASSETS/DeMamba/results/all_Class_4/eval/predictions.json"}
 
+RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209.json"}
+
 VIDEO_DIR=${VIDEO_DIR:-"$DATA_ROOT/videos"}
-PROMPT_FILE="${PR_DIR}/trace/prompts/dvc.txt"
+PROMPT_FILE="${DIR}/trace/prompts/dvc.txt"
 
 NUM_FRAME=40
 MAX_NEW_TOKENS=512
 
-# The released ref2 checkpoint expects 16 boundary, 8 event, and 16 boundary frames.
+# Ref Mode Sampling Arguments (Same as training)
 BND_RATIO=0.2
 BND_FRAMES=16
 SEG_FRAMES=8
 
-NUM_GPUS=${NUM_GPUS:-1}
-if [ "${NUM_GPUS}" -lt 1 ]; then
-  echo "Error: NUM_GPUS must be at least 1."
-  exit 1
-fi
+NUM_GPUS=8
 
 OUTPUT_DIR="${MSLOC_ASSETS}/Trace/inference_results/ref2_${DATASET}_${SPLIT}"
 mkdir -p "${OUTPUT_DIR}"
 
+# ============================ Parameter checks ============================
 if [ ! -f "${TEST_ANNO_FILE}" ]; then
   echo "Error: TEST_ANNO_FILE does not exist: ${TEST_ANNO_FILE}"
   exit 1
 fi
+
+# RAW_ANNO_FILE branch removed; evaluate.py now consumes the raw annotation directly.
 
 if [ ! -d "${MODEL_DIR}" ]; then
   echo "Error: MODEL_DIR does not exist: ${MODEL_DIR}"
@@ -60,41 +69,22 @@ echo "=========================================="
 
 echo "Starting inference..."
 
-PIDS=()
-
-cleanup() {
-  trap - INT TERM
-  echo
-  echo "Stopping inference processes..."
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "${pid}" 2>/dev/null; then
-      kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
-    fi
-  done
-  sleep 2
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "${pid}" 2>/dev/null; then
-      kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
-    fi
-  done
-  wait 2>/dev/null || true
-  exit 130
-}
-
-trap cleanup INT TERM
-
+# ============================ Parallel inference ============================
 for i in $(seq 0 $(($NUM_GPUS - 1))); do
   echo "Starting process on GPU ${i} (chunk ${i}/${NUM_GPUS})..."
 
   if [ "$i" -eq 0 ]; then
-    setsid env CUDA_VISIBLE_DEVICES=$i python -u ${PR_DIR}/trace/eval/evaluate_ref.py \
+    CUDA_VISIBLE_DEVICES=$i python -u ${DIR}/trace/eval/evaluate_ref.py \
+      --anno_path "${DIR}/scripts/eval" \
       --anno_file "${TEST_ANNO_FILE}" \
       --video_path "${VIDEO_DIR}" \
       --gpu_id 0 \
+      --task "${TASK}" \
       --dataset "${DATASET}" \
       --output_dir "${OUTPUT_DIR}" \
       --split "${SPLIT}" \
       --num_frames ${NUM_FRAME} \
+      --batch_size 1 \
       --prompt_file "${PROMPT_FILE}" \
       --model_path "${MODEL_DIR}" \
       --max_new_tokens ${MAX_NEW_TOKENS} \
@@ -106,17 +96,19 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --bnd_ratio ${BND_RATIO} \
       --bnd_frames ${BND_FRAMES} \
       --seg_frames ${SEG_FRAMES} &
-    PIDS+=($!)
   else
     LOG_FILE="${OUTPUT_DIR}/gpu${i}.stdout.log"
-    setsid env CUDA_VISIBLE_DEVICES=$i python -u ${PR_DIR}/trace/eval/evaluate_ref.py \
+    CUDA_VISIBLE_DEVICES=$i python -u ${DIR}/trace/eval/evaluate_ref.py \
+      --anno_path "${DIR}/scripts/eval" \
       --anno_file "${TEST_ANNO_FILE}" \
       --video_path "${VIDEO_DIR}" \
       --gpu_id 0 \
+      --task "${TASK}" \
       --dataset "${DATASET}" \
       --output_dir "${OUTPUT_DIR}" \
       --split "${SPLIT}" \
       --num_frames ${NUM_FRAME} \
+      --batch_size 1 \
       --prompt_file "${PROMPT_FILE}" \
       --model_path "${MODEL_DIR}" \
       --max_new_tokens ${MAX_NEW_TOKENS} \
@@ -124,33 +116,14 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --num_chunks ${NUM_GPUS} \
       --chunk_idx $i \
       --quiet_non_master \
-      --tqdm_position $i \
-      --bnd_ratio ${BND_RATIO} \
-      --bnd_frames ${BND_FRAMES} \
-      --seg_frames ${SEG_FRAMES} 1>"${LOG_FILE}" &
-    PIDS+=($!)
+      --tqdm_position $i 1>"${LOG_FILE}" &
   fi
 done
 
-FAILED=0
-for pid in "${PIDS[@]}"; do
-  if ! wait "${pid}"; then
-    FAILED=1
-  fi
-done
-
-trap - INT TERM
-
-if [ "${FAILED}" -ne 0 ]; then
-  echo "Error: one or more inference processes failed. Merge skipped."
-  exit 1
-fi
+wait
 
 echo "All inference processes finished."
 
-if [ "${NUM_GPUS}" -eq 1 ]; then
-  echo "Single-GPU result already generated; merge skipped."
-else
 echo "Merging results..."
 
 export OUTPUT_DIR
@@ -196,6 +169,8 @@ elif isinstance(first, dict):
     if 'annotations' not in first or not isinstance(first['annotations'], list):
         raise SystemExit('Dict root json but missing annotations list')
 
+    # For dict-rooted json, only the `annotations` list is merged across chunks.
+    # Other fields are taken from the first chunk.
     merged_anns = []
     for fp in files:
         with open(fp, 'r', encoding='utf-8') as f:
@@ -204,7 +179,7 @@ elif isinstance(first, dict):
             print(f'Warning: {fp} is not dict-with-annotations, skipped')
             continue
         merged_anns.extend(data.get('annotations', []))
-
+    
     first['annotations'] = merged_anns
     out = first
 else:
@@ -220,10 +195,11 @@ EOF
 
 python "${MERGE_SCRIPT}"
 rm -f "${MERGE_SCRIPT}"
-fi
 
 echo "=========================================="
 echo "Inference finished."
 echo "Result file: ${OUTPUT_DIR}/fmt_${DATASET}_${SPLIT}_f${NUM_FRAME}_result.json"
 echo "- Per-GPU stdout logs: ${OUTPUT_DIR}/gpu*.stdout.log"
 echo "=========================================="
+
+
