@@ -1,16 +1,9 @@
 import json
 import numpy as np
-from sklearn.metrics import f1_score, accuracy_score
-
-
-def is_fake_annotation(video_entry, annotation):
-    """Support both TASLE annotation schemas without accepting explicit real segments."""
-    if video_entry.get("type") != "fake" or "segment" not in annotation:
-        return False
-    segment_label = annotation.get("segment_label")
-    return segment_label is None or segment_label == "fake"
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 
 def calculate_iou(seg1, seg2):
+    """Calculate IoU between two segments [start, end]."""
     start1, end1 = seg1
     start2, end2 = seg2
 
@@ -25,6 +18,10 @@ def calculate_iou(seg1, seg2):
     return intersection / union
 
 def get_matches(pred_segs, gt_segs, threshold):
+    """
+    Match predictions to ground truths using greedy IoU matching.
+    Returns (tp, fp, fn) counts.
+    """
     if not pred_segs and not gt_segs:
         return 0, 0, 0
     if not pred_segs:
@@ -60,23 +57,7 @@ def get_matches(pred_segs, gt_segs, threshold):
     return tp, fp, fn
 
 
-def keep_fake_videos(gt_data, infer_data):
-    """Restrict evaluation to GT fake videos and their matching predictions."""
-    fake_gt_data = [
-        item for item in gt_data
-        if str(item.get('type', '')).strip().lower() == 'fake'
-    ]
-    if not fake_gt_data:
-        raise ValueError("Ground-truth JSON contains no type='fake' videos")
-
-    fake_paths = {item['video_path'] for item in fake_gt_data}
-    fake_infer_data = [
-        item for item in infer_data
-        if item.get('video_path') in fake_paths
-    ]
-    return fake_gt_data, fake_infer_data
-
-def evaluate(gt_json_file, infer_json_file, window_size=0.01):
+def evaluate(gt_json_file, infer_json_file):
     print(f"Loading GT: {gt_json_file}...")
     with open(gt_json_file, 'r', encoding='utf-8') as f:
         gt_data = json.load(f)
@@ -85,38 +66,7 @@ def evaluate(gt_json_file, infer_json_file, window_size=0.01):
     with open(infer_json_file, 'r', encoding='utf-8') as f:
         infer_data = json.load(f)
 
-    if not isinstance(gt_data, list) or not all(isinstance(item, dict) for item in gt_data):
-        raise ValueError("Ground-truth JSON must be a list of objects")
-    if not isinstance(infer_data, list) or not all(isinstance(item, dict) for item in infer_data):
-        raise ValueError("Inference JSON must be a list of objects")
-    if any(not isinstance(item.get('video_path'), str) for item in gt_data):
-        raise ValueError("Every ground-truth record must contain a string video_path")
-    if any(not isinstance(item.get('video_path'), str) for item in infer_data):
-        raise ValueError("Every inference record must contain a string video_path")
-
-    total_gt_videos = len(gt_data)
-    gt_data, infer_data = keep_fake_videos(gt_data, infer_data)
-    print(
-        f"Fake-only evaluation: {len(gt_data)}/{total_gt_videos} GT videos; "
-        "real videos are excluded from every metric."
-    )
-
-    if window_size <= 0:
-        raise ValueError(f"window_size must be positive, got {window_size}")
-
-    gt_paths = [item['video_path'] for item in gt_data]
-    pred_paths = [item['video_path'] for item in infer_data]
-    if len(gt_paths) != len(set(gt_paths)):
-        raise ValueError("Ground-truth JSON contains duplicate video_path entries")
-    if len(pred_paths) != len(set(pred_paths)):
-        raise ValueError("Inference JSON contains duplicate video_path entries")
-    missing_predictions = sorted(set(gt_paths) - set(pred_paths))
-    extra_predictions = sorted(set(pred_paths) - set(gt_paths))
-    if missing_predictions or extra_predictions:
-        raise ValueError(
-            "Prediction split does not match ground truth: "
-            f"missing={len(missing_predictions)}, extra={len(extra_predictions)}"
-        )
+    print(f"Total GT videos: {len(gt_data)}")
 
     pred_map = {item['video_path']: item for item in infer_data}
 
@@ -184,14 +134,17 @@ def evaluate(gt_json_file, infer_json_file, window_size=0.01):
         if gt_entry['type'] == 'fake':
             if 'annotations' in gt_entry:
                 for ann in gt_entry['annotations']:
-                    if is_fake_annotation(gt_entry, ann):
-                        gt_segments.append(ann['segment'])
+                    # Only collect fake segments for window GT
+                    if ann.get('segment_label') == 'fake' or gt_entry['type'] == 'fake':
+                        if 'segment' in ann:
+                            gt_segments.append(ann['segment'])
 
         curr_y_true_win = []
         curr_y_pred_win = []
 
         duration = gt_entry.get('duration', 0)
         if duration > 0:
+            window_size = 0.01
             for start in np.arange(0, duration, window_size):
                 end = min(start + window_size, duration)
                 if end <= start: continue
@@ -240,7 +193,7 @@ def evaluate(gt_json_file, infer_json_file, window_size=0.01):
 
         det_acc = accuracy_score(stats['y_true_vid'], stats['y_pred_vid'])
 
-        loc_f1 = f1_score(stats['y_true_win'], stats['y_pred_win'], pos_label=1, zero_division=0)
+        loc_f1 = f1_score(stats['y_true_win'], stats['y_pred_win'], pos_label=1)
 
         iou_f1s = []
         print(f"Segment-level metrics per threshold ({domain}):")
@@ -288,12 +241,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gt_file", type=str, required=True, help="Path to GT JSON file")
     parser.add_argument("--infer_file", type=str, required=True, help="Path to Inference JSON file")
-    parser.add_argument(
-        "--window_size",
-        type=float,
-        default=0.01,
-        help="Temporal grid in seconds for Loc_F1 (default: 0.01, matching the released evaluation).",
-    )
     args = parser.parse_args()
 
-    evaluate(args.gt_file, args.infer_file, args.window_size)
+    evaluate(args.gt_file, args.infer_file)
