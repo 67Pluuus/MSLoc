@@ -1,6 +1,7 @@
 import models
 import time
 from itertools import islice
+from pathlib import Path
 import torch
 import math
 from tqdm import tqdm
@@ -432,14 +433,14 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
     # Detect binary mode.
     is_binary = cfg.get('mode', '') == 'binary'
 
-    with torch.no_grad():
-        for i, (window_idx, input, target, binary_label, video_id) in enumerate(tqdm(val_loader, desc="Validation", total=len(val_loader))):
+    memory_status = Path('/proc/self/status')
+    with torch.no_grad(), tqdm(val_loader, desc="Validation", total=len(val_loader)) as progress:
+        for i, (window_idx, input, target, binary_label, video_id) in enumerate(progress):
             if i == 0:
                 ss_time = time.time()
 
             input = input[:,0]
             varInput = torch.autograd.Variable(input.float().cuda())
-            varTarget = torch.autograd.Variable(target.contiguous().cuda())
             var_Binary_Target = torch.autograd.Variable(binary_label.contiguous().cuda())
 
             logit = model(varInput)
@@ -454,16 +455,22 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
             # Process predictions according to the mode.
             if is_binary:
                 # Binary: sigmoid of the first logit.
-                outpred_list.append(logit[:,0].sigmoid().cpu().detach().numpy())
+                fake_scores = logit[:, 0].sigmoid()
+                segment_scores = fake_scores
             else:
                 # Four-class: take the foreground probabilities.
                 pred_probs = torch.softmax(logit, dim=1)
                 # Sum over foreground classes (everything except class 0) as the fake score.
                 fake_scores = pred_probs[:, 1:].sum(dim=1)
-                outpred_list.append(fake_scores.cpu().detach().numpy())
+                segment_scores = (pred_probs[:, 1:].max(dim=1).values > pred_probs[:, 0]).float()
             
-            gt_label_list.append(varTarget.cpu().detach().numpy())
+            # Keep independent CPU values, not views into DataLoader or tensor storage.
+            outpred_list.append(fake_scores.cpu().numpy().copy())
+            gt_label_list.append(target.numpy().copy())
             video_list.append(video_id)
+            window_indices = window_idx.tolist()
+            segment_scores = segment_scores.cpu().tolist()
+            target_values = target.tolist()
 
             ''' Per-video predictions. '''
             for j in range(len(video_id)):
@@ -473,16 +480,17 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
                     video_seg_gt[video_id_j] = []
                     video_loc_gt[video_id_j] = test_fake_segments[video_id_j]
                 
-                # Per-window prediction handled by mode.
-                if is_binary:
-                    pred_score = logit[j,0].sigmoid().cpu().detach().numpy()
-                else:
-                    pred_probs = torch.softmax(logit[j], dim=0)
-                    pred_score = (pred_probs[1:].max() > pred_probs[0]).float().cpu().detach().numpy()
+                video_seg_pred[video_id_j].append((window_indices[j], segment_scores[j]))
+                video_seg_gt[video_id_j].append((window_indices[j], target_values[j]))
 
-                
-                video_seg_pred[video_id_j].append((window_idx[j], pred_score))
-                video_seg_gt[video_id_j].append((window_idx[j], target[j].cpu().detach().numpy()))
+            del input, target, binary_label, window_idx, varInput, var_Binary_Target, logit, lossvalue, fake_scores
+            if not is_binary:
+                del pred_probs
+            if (i == 0 or (i + 1) % 50 == 0 or i + 1 == len(val_loader)) and memory_status.is_file():
+                for line in memory_status.read_text().splitlines():
+                    if line.startswith('VmRSS:'):
+                        progress.set_postfix(ram_gib=f'{int(line.split()[1]) / 1024 ** 2:.2f}')
+                        break
 
     # Build per-video evaluation data.
     loc_data = []
