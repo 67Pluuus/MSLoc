@@ -7,7 +7,8 @@ max_epoch: 10
 bath_per_epoch: 1000
 train_batch_size: 32
 val_batch_size: 32
-num_workers: 32
+num_workers: 4
+show_progress: true
 lr: 0.000001
 
 train_json_path: '../../MSLoc_assets/data/Tasle-CoT-10K/annos/msloc_train.json'

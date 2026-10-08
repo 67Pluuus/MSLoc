@@ -44,6 +44,11 @@ def train_model(cfg, args):
             or len(set(device_ids)) != len(device_ids)):
         raise ValueError(f'Invalid CUDA device IDs: {args.device_ids}')
     torch.cuda.set_device(device_ids[0])
+    if args.micro_batch_size <= 0:
+        raise ValueError('--micro-batch-size must be positive')
+    micro_batch_size = min(cfg['train_batch_size'], args.micro_batch_size * len(device_ids))
+    if cfg['train_batch_size'] <= 0 or cfg['val_batch_size'] <= 0 or cfg['num_workers'] < 0:
+        raise ValueError('Batch sizes must be positive and num_workers must be nonnegative')
 
     # Prepare the output directory.
     output_dir = Path(cfg['save_dir'])
@@ -97,6 +102,8 @@ def train_model(cfg, args):
 
     # Run training and validation.
     print(f'MSLoc-PG: four_class, SFT, seed={args.seed}, devices={device_ids}')
+    print(f'Effective batch={cfg["train_batch_size"]}, forward batch={micro_batch_size}, '
+          f'workers={cfg["num_workers"]}')
     for epoch in range(start_epoch, cfg['max_epoch']):
         print(f'******* Training epoch {epoch + 1}/{cfg["max_epoch"]} *******')
         train_loader, val_loader, segments = generate_dataset_loader_from_json(cfg)
@@ -105,6 +112,7 @@ def train_model(cfg, args):
         best_epoch, best_score, elapsed = train_one_epoch(
             cfg, model, loss, scheduler, optimizer, epoch, best_epoch, best_score,
             train_loader, val_loader, str(output_dir), segments,
+            micro_batch_size=micro_batch_size,
         )
         unwrapped = model.module if isinstance(model, torch.nn.DataParallel) else model
         state = dict(
@@ -122,8 +130,12 @@ def train_model(cfg, args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--device-ids', default='0')
+    parser.add_argument('--config', default='./configs/MSLoc_train.yaml')
+    parser.add_argument('--device-ids', default='0,1,2,3,4,5,6,7')
+    parser.add_argument('--micro-batch-size', type=int, default=4,
+                        help='Maximum windows per GPU per forward; accumulate to train_batch_size')
+    parser.add_argument('--val-batch-size', type=int, default=None)
+    parser.add_argument('--num-workers', type=int, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--resume', action='store_true', help='Resume the last completed epoch')
     parser.add_argument('--clean', action='store_true', help='Remove this run\'s training outputs')
@@ -134,7 +146,13 @@ def main():
     # Load the config.
     with open(args.config, encoding='utf-8') as handle:
         cfg = yaml.safe_load(handle)
+    if args.val_batch_size is not None:
+        cfg['val_batch_size'] = args.val_batch_size
+    if args.num_workers is not None:
+        cfg['num_workers'] = args.num_workers
 
+    os.environ.setdefault('XCLIP_WEIGHTS_PATH',
+                          '../../MSLoc_assets/DeMamba/pretrained_weights/xclip-base-patch16')
     train_model(cfg, args)
 
 

@@ -1,5 +1,6 @@
 import models
 import time
+from itertools import islice
 import torch
 import math
 from tqdm import tqdm
@@ -541,38 +542,44 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
 
     return pred_accuracy, video_list, pred_labels, true_labels, outpred, all_videos_results
 
-def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoch, max_acc, train_loader, val_loader, snapshot_path, test_fake_segments):
+def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoch, max_acc, train_loader, val_loader, snapshot_path, test_fake_segments, micro_batch_size=None):
     model.train()
     trainLoss = 0
     lossTrainNorm = 0
 
+    ss_time = time.time()
+    num_batches = min(len(train_loader), cfg['bath_per_epoch'])
+    if num_batches <= 0 or (micro_batch_size is not None and micro_batch_size <= 0):
+        raise ValueError('Training requires positive batch counts and micro-batch size')
+    with tqdm(islice(train_loader, num_batches), total=num_batches,
+              desc=f'Train {epochID + 1}/{cfg["max_epoch"]}') as pbar:
+        for index, input, target, binary_label in pbar:
+            input = input[:, 0].float()
+            batch_size = input.shape[0]
+            chunk_size = micro_batch_size or batch_size
+            optimizer.zero_grad(set_to_none=True)
+            batch_loss = 0.0
+
+            # Weight each micro-batch by its size to preserve the full-batch mean loss.
+            for start in range(0, batch_size, chunk_size):
+                stop = min(start + chunk_size, batch_size)
+                varInput = input[start:stop].cuda()
+                var_Binary_Target = binary_label[start:stop].contiguous().cuda()
+                logit = model(varInput)
+                if cfg['mode'] == 'binary':
+                    lossvalue = loss_ce(logit, var_Binary_Target)
+                else:
+                    lossvalue = loss_ce(logit, var_Binary_Target.long()[:, 0])
+                lossvalue = lossvalue * ((stop - start) / batch_size)
+                lossvalue.backward()
+                batch_loss += lossvalue.item()
+                del lossvalue, logit, varInput, var_Binary_Target
+            optimizer.step()
+
+            trainLoss += batch_loss
+            lossTrainNorm += 1
+            pbar.set_postfix(loss=trainLoss / lossTrainNorm, lr=optimizer.param_groups[0]['lr'])
     scheduler.step()
-    pbar = tqdm(total=cfg['bath_per_epoch'])
-    for batchID, (index, input, target, binary_label) in enumerate(train_loader):
-        if batchID > cfg['bath_per_epoch']:
-            break
-        if batchID == 0:
-            ss_time = time.time()
-        input = input[:,0].float()
-        varInput = torch.autograd.Variable(input).cuda()
-        varTarget = torch.autograd.Variable(target.contiguous().cuda())
-        var_Binary_Target = torch.autograd.Variable(binary_label.contiguous().cuda())
-        optimizer.zero_grad()
-
-        logit = model(varInput)
-        if cfg['mode'] == 'binary':
-            lossvalue = loss_ce(logit, var_Binary_Target)
-        else:
-            lossvalue = loss_ce(logit, var_Binary_Target.long()[:, 0])
-        
-        lossvalue.backward()
-        optimizer.step()
-
-        trainLoss += lossvalue.item()
-        lossTrainNorm += 1
-        pbar.set_postfix(loss=trainLoss / lossTrainNorm)
-        pbar.update(1)
-        del lossvalue
 
     trainLoss = trainLoss / lossTrainNorm
     

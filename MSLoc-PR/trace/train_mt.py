@@ -1,10 +1,12 @@
 # Original training pipeline: LLaVA / FastChat, Apache-2.0.
 
 import os
+import json
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Load the local trace package before the standard library module.
 project_root = str(Path(__file__).resolve().parents[1])
@@ -12,6 +14,7 @@ sys.path.insert(0, project_root)
 if 'trace' in sys.modules and not hasattr(sys.modules['trace'], '__path__'):
     del sys.modules['trace']
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
 
 import torch
 import transformers
@@ -56,9 +59,10 @@ class TrainingArguments(transformers.TrainingArguments):
     output_dir: str = field(default='../../MSLoc_assets/Trace/output/trace_vllava/ref2')
     num_train_epochs: float = field(default=2.0)
     learning_rate: float = field(default=3e-5)
-    per_device_train_batch_size: int = field(default=16)
+    global_batch_size: int = field(default=16)
+    per_device_train_batch_size: int = field(default=2)
     per_device_eval_batch_size: int = field(default=1)
-    gradient_accumulation_steps: int = field(default=1)
+    gradient_accumulation_steps: Optional[int] = field(default=None)
     weight_decay: float = field(default=0.0)
     warmup_ratio: float = field(default=0.03)
     lr_scheduler_type: str = field(default='cosine')
@@ -79,6 +83,20 @@ class TrainingArguments(transformers.TrainingArguments):
     ddp_find_unused_parameters: bool = field(default=False)
     model_max_length: int = field(default=4096)
     resume_from_checkpoint: str = field(default=None)
+    clean: bool = field(default=False)
+    disable_tqdm: bool = field(default=False)
+
+    def __post_init__(self):
+        world_size = int(os.environ.get('WORLD_SIZE', '1'))
+        forward_batch = self.per_device_train_batch_size * world_size
+        if self.global_batch_size <= 0 or forward_batch <= 0 or self.global_batch_size % forward_batch:
+            raise ValueError('global_batch_size must be a positive multiple of per-device batch * world size')
+        accumulation = self.global_batch_size // forward_batch
+        if self.gradient_accumulation_steps is None:
+            self.gradient_accumulation_steps = accumulation
+        elif self.gradient_accumulation_steps != accumulation:
+            raise ValueError('Batch size, world size and accumulation must match global_batch_size')
+        super().__post_init__()
 
 
 class TraceTrainer(Trainer):
@@ -137,6 +155,88 @@ def check_closs_logits(module, inputs, output):
         raise FloatingPointError('Nonfinite anomaly classification logits')
 
 
+def prepare_training_output(model_args, data_args, training_args):
+    """Prepare one training directory on rank zero, then share the result."""
+    result = [None, None]
+    if training_args.process_index == 0:
+        try:
+            output_dir = Path(training_args.output_dir).resolve()
+            resume = training_args.resume_from_checkpoint
+            if training_args.clean and resume:
+                raise ValueError('--clean and --resume_from_checkpoint are mutually exclusive')
+            if training_args.overwrite_output_dir:
+                raise ValueError('Use --clean to restart; overwrite_output_dir can leave stale checkpoints')
+            marker = output_dir / 'msloc_training.json'
+            if training_args.clean:
+                protected = [model_args.model_name_or_path, model_args.vision_tower,
+                             model_args.class_feature_path, data_args.data_path, data_args.eval_data_path,
+                             data_args.proposal_path, data_args.data_folder, project_root]
+                if any(Path(path).resolve().is_relative_to(output_dir) for path in protected):
+                    raise ValueError('The output directory contains model, data or code inputs')
+                owned = marker.is_file() and json.loads(marker.read_text()) == {'stage': 'MSLoc-PR'}
+                # Recognize runs saved before the training marker was introduced.
+                if not owned and (output_dir / 'config.json').is_file():
+                    config = json.loads((output_dir / 'config.json').read_text())
+                    owned = (config.get('model_type') == 'trace_mistral'
+                             and config.get('mm_projector_type') == 'ref_projector'
+                             and (output_dir / 'training_args.bin').is_file())
+                if not owned:
+                    raise ValueError('--clean requires a recognized MSLoc-PR training output directory')
+                marker.write_text(json.dumps({'stage': 'MSLoc-PR'}), encoding='utf-8')
+                for path in output_dir.iterdir():
+                    if path == marker:
+                        continue
+                    if path.is_symlink():
+                        path.unlink()
+                    elif path.is_dir():
+                        if not path.resolve().is_relative_to(output_dir):
+                            raise ValueError(f'Output path escapes the training directory: {path}')
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                print(f'Cleaned MSLoc-PR training outputs: {output_dir}')
+            if resume == 'latest':
+                resume = get_last_checkpoint(str(output_dir)) if output_dir.is_dir() else None
+                if resume is None:
+                    raise FileNotFoundError(f'No saved training state in {output_dir}')
+            if resume:
+                checkpoint = Path(resume)
+                if checkpoint.resolve().parent != output_dir:
+                    raise ValueError('Resume from a checkpoint inside output_dir')
+                required = ['trainer_state.json', 'optimizer.pt', 'scheduler.pt']
+                required += ([f'rng_state_{rank}.pth' for rank in range(training_args.world_size)]
+                             if training_args.world_size > 1 else ['rng_state.pth'])
+                missing = [name for name in required if not (checkpoint / name).is_file()]
+                if missing:
+                    raise FileNotFoundError(f'Incomplete resume state in {checkpoint}: {missing}')
+                rng_files = {path.name for path in checkpoint.glob('rng_state*.pth')}
+                if rng_files != {name for name in required if name.startswith('rng_state')}:
+                    raise ValueError('Resume with the same GPU process count as the saved run')
+                weights = ['model.safetensors', 'pytorch_model.bin',
+                           'model.safetensors.index.json', 'pytorch_model.bin.index.json']
+                if not any((checkpoint / name).is_file() for name in weights):
+                    raise FileNotFoundError(f'No model weights in {checkpoint}')
+                for name in weights[2:]:
+                    index = checkpoint / name
+                    if index.is_file():
+                        shards = json.loads(index.read_text())['weight_map'].values()
+                        if any(not (checkpoint / shard).is_file() for shard in shards):
+                            raise FileNotFoundError(f'Missing model shards in {checkpoint}')
+                print(f'Resuming MSLoc-PR from {checkpoint}')
+            elif output_dir.exists() and any(output_dir.iterdir()) and not training_args.clean:
+                raise FileExistsError(f'{output_dir} is nonempty; use --resume_from_checkpoint or --clean')
+            output_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps({'stage': 'MSLoc-PR'}), encoding='utf-8')
+            result[0] = resume
+        except Exception as error:
+            result[1] = f'{type(error).__name__}: {error}'
+    if torch.distributed.is_initialized():
+        torch.distributed.broadcast_object_list(result, src=0)
+    if result[1] is not None:
+        raise RuntimeError(result[1])
+    return result[0]
+
+
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -165,22 +265,15 @@ def train():
         raise ValueError('Use torchrun for multiple GPUs, or CUDA_VISIBLE_DEVICES=0 for one GPU')
     if training_args.deepspeed or training_args.fsdp:
         raise ValueError('This entry point supports single-GPU training and torchrun DDP')
+    if training_args.save_only_model:
+        raise ValueError('Keep save_only_model=False to preserve resumable training state')
 
     set_seed(training_args.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
     # Prepare the output directory and resume state.
-    output_dir = Path(training_args.output_dir)
-    resume = training_args.resume_from_checkpoint
-    if resume == 'latest':
-        resume = get_last_checkpoint(str(output_dir)) if output_dir.is_dir() else None
-        if resume is None:
-            raise FileNotFoundError(f'No saved training state in {output_dir}')
-    if resume and not Path(resume).is_dir():
-        raise FileNotFoundError(resume)
-    if output_dir.exists() and any(output_dir.iterdir()) and not resume and not training_args.overwrite_output_dir:
-        raise FileExistsError(f'{output_dir} is nonempty; resume or select a new output directory')
+    resume = prepare_training_output(model_args, data_args, training_args)
 
     # Load the model and initialize the training modules.
     config = AutoConfig.from_pretrained(model_args.model_name_or_path, local_files_only=True)

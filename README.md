@@ -70,12 +70,11 @@ Install PyTorch and torchvision wheels matching the local CUDA driver when neces
 
 ## Training
 
-Use the environments and asset layout above.
-Place the Mistral-based `trace-uni` model under `MSLoc_assets/Trace/ckpts/` and BGE under `MSLoc_assets/Trace/bge-large-en-v1.5/`.
+Use the environments and asset layout above, with the Mistral-based `trace-uni` model.
 
 ### 1. Prepare data
 
-Extract 8-fps frames, then reserve 10% of `annos/train_all_1209.json` for validation. Skip extraction if the frames are already prepared.
+Extract 8-fps frames (skip if prepared) and reserve 10% of training videos for validation.
 
 ```bash
 cd MSLoc/MSLoc-PG
@@ -89,7 +88,7 @@ python ../scripts/prepare_train.py \
     --val_ratio 0.1 --seed 42
 ```
 
-Outputs: frames in `../../MSLoc_assets/data/Tasle-CoT-10K/video_frames/`, and `msloc_train.json` / `msloc_val.json` in the annotation directory.
+Outputs: `video_frames/` and `annos/msloc_train.json` / `annos/msloc_val.json` under the dataset directory.
 
 ### 2. Train MSLoc-PG and generate proposals
 
@@ -97,19 +96,22 @@ In the `msloc-pg` environment:
 
 ```bash
 cd MSLoc/MSLoc-PG
-bash train.sh
+python train.py \
+    --config ./configs/MSLoc_train.yaml \
+    --device-ids 0,1,2,3,4,5,6,7 \
+    --micro-batch-size 4 --num-workers 4 --seed 42
 python eval.py \
     --config ./configs/XCLIP_Tasle_train.yaml \
     --model_path ../../MSLoc_assets/DeMamba/results/all_Class_4/best_acc.pth \
     --output_dir ../../MSLoc_assets/DeMamba/results/all_Class_4/eval_train
 ```
 
-Settings are in `configs/MSLoc_train.yaml`. Outputs go to
-`../../MSLoc_assets/DeMamba/results/all_Class_4/`, including `eval_train/predictions.json`.
+Outputs: `../../MSLoc_assets/DeMamba/results/all_Class_4/`, including `eval_train/predictions.json`.
+Single GPU: `--device-ids 0` (effective batch 32). Resume: `--resume`.
 
 ### 3. Train MSLoc-PR
 
-Switch to the `msloc-pr` environment, prepare anomaly-class features, then train:
+In the `msloc-pr` environment, extract class features and train with DAM, EAM and anomaly-aware loss:
 
 ```bash
 cd MSLoc/MSLoc-PR
@@ -118,11 +120,14 @@ python trace/scripts/extract_class_features.py \
     --bge_model_path ../../MSLoc_assets/Trace/bge-large-en-v1.5 \
     --output_path ../../MSLoc_assets/Trace/class_features_bge.pt \
     --device cuda --batch_size 32
-bash scripts/train/ref2.sh
+python -m torch.distributed.run --standalone --nproc_per_node=8 trace/train_mt.py \
+    --global_batch_size 16 --per_device_train_batch_size 2 \
+    --num_train_epochs 2 --learning_rate 3e-5 \
+    --dataloader_num_workers 4 --report_to none --seed 42 --data_seed 42
 ```
 
-This enables DAM, EAM and anomaly-aware loss with 40 frames, 2 epochs, effective batch size 16 and learning rate `3e-5`.
-Training outputs go to `../../MSLoc_assets/Trace/output/trace_vllava/ref2/`.
+Outputs: `../../MSLoc_assets/Trace/output/trace_vllava/ref2/`.
+Single GPU: `--nproc_per_node=1` (effective batch 16). Resume: `--resume_from_checkpoint latest`.
 
 ## Inference
 

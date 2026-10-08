@@ -12,6 +12,7 @@ import warnings
 import json
 from typing import List, Dict, Any, Tuple
 from pathlib import Path
+from tqdm import tqdm
 
 def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
     """
@@ -60,7 +61,7 @@ def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
 
 def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str, 
                           window_length: float = 1.0, frames_per_window: int = 4,
-                          mode: str = "binary") -> List[Dict]:
+                          mode: str = "binary", show_progress: bool = False) -> List[Dict]:
     """
     Parse JSON data and produce sliding-window samples.
 
@@ -70,6 +71,7 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
         window_length: Window length in seconds.
         frames_per_window: Number of frames sampled per window.
         mode: Classification mode, "binary" or "four_class".
+        show_progress: Display video preparation progress.
 
     Returns:
         A list of window dicts containing frame paths and labels.
@@ -77,7 +79,7 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
     fps = 8  # fixed frame rate
     windows = []
     
-    for video_item in json_data:
+    for video_item in tqdm(json_data, desc='Preparing video windows', disable=not show_progress):
         video_path = video_item["video_path"]
         video_type = video_item["type"]
         duration = video_item["duration"]
@@ -485,7 +487,8 @@ def generate_dataset_loader_from_json(cfg):
         cfg['dataset_base_path'],
         cfg.get('window_length', 1.0),
         cfg.get('frames_per_window', 4),
-        cfg.get('mode', 'binary')
+        cfg.get('mode', 'binary'),
+        show_progress=cfg.get('show_progress', False)
     )
     
     test_windows = parse_json_to_windows(
@@ -493,7 +496,8 @@ def generate_dataset_loader_from_json(cfg):
         cfg['dataset_base_path'],
         cfg.get('window_length', 1.0),
         cfg.get('frames_per_window', 4),
-        cfg.get('mode', 'binary')
+        cfg.get('mode', 'binary'),
+        show_progress=cfg.get('show_progress', False)
     )
     test_fake_segments = get_video_fake_segments(test_json)
     
