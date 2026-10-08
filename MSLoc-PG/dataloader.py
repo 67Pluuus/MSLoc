@@ -460,7 +460,18 @@ class VideoWindowDatasetTest(Dataset):
         return window_idx, frames, label_onehot, binary_label, video_name
 
 
-def generate_dataset_loader_from_json(cfg):
+def select_video_records(records, limit=0):
+    """Select the first N complete videos; zero keeps every record."""
+    if limit < 0:
+        raise ValueError('Video limit must be nonnegative')
+    if limit == 0:
+        return records
+    video_paths = list(dict.fromkeys(item['video_path'] for item in records))
+    selected_paths = set(video_paths[:limit])
+    return [item for item in records if item['video_path'] in selected_paths]
+
+
+def generate_dataset_loader_from_json(cfg, include_train=True):
     """
     Build train / test data loaders from JSON annotation files.
 
@@ -476,30 +487,30 @@ def generate_dataset_loader_from_json(cfg):
             - other training-related parameters.
     """
     # Load JSON files.
-    with open(cfg['train_json_path'], 'r') as f:
-        train_json = json.load(f)
+    if include_train:
+        with open(cfg['train_json_path'], 'r') as f:
+            train_json = json.load(f)
     with open(cfg['test_json_path'], 'r') as f:
         test_json = json.load(f)
 
     # Keep complete videos so localization metrics never use truncated windows.
     val_videos = cfg.get('val_videos', 0)
-    if val_videos < 0:
-        raise ValueError('val_videos must be nonnegative')
+    total_videos = len({item['video_path'] for item in test_json})
+    test_json = select_video_records(test_json, val_videos)
     if val_videos > 0:
-        video_paths = list(dict.fromkeys(item['video_path'] for item in test_json))
-        selected_paths = set(video_paths[:val_videos])
-        test_json = [item for item in test_json if item['video_path'] in selected_paths]
-        print(f'Validation videos: {len(selected_paths)}/{len(video_paths)} (limit={val_videos})')
+        selected_count = len({item['video_path'] for item in test_json})
+        print(f'Validation videos: {selected_count}/{total_videos} (limit={val_videos})')
     
     # Convert to per-window samples.
-    train_windows = parse_json_to_windows(
-        train_json, 
-        cfg['dataset_base_path'],
-        cfg.get('window_length', 1.0),
-        cfg.get('frames_per_window', 4),
-        cfg.get('mode', 'binary'),
-        show_progress=cfg.get('show_progress', False)
-    )
+    if include_train:
+        train_windows = parse_json_to_windows(
+            train_json,
+            cfg['dataset_base_path'],
+            cfg.get('window_length', 1.0),
+            cfg.get('frames_per_window', 4),
+            cfg.get('mode', 'binary'),
+            show_progress=cfg.get('show_progress', False)
+        )
     
     test_windows = parse_json_to_windows(
         test_json,
@@ -512,11 +523,12 @@ def generate_dataset_loader_from_json(cfg):
     test_fake_segments = get_video_fake_segments(test_json)
     
     # Build datasets.
-    train_dataset = VideoWindowDatasetTrain(
-        train_windows,
-        mode=cfg.get('mode', 'binary'),
-        transform_config=cfg.get('transform_config', {})
-    )
+    if include_train:
+        train_dataset = VideoWindowDatasetTrain(
+            train_windows,
+            mode=cfg.get('mode', 'binary'),
+            transform_config=cfg.get('transform_config', {})
+        )
     
     test_dataset = VideoWindowDatasetTest(
         test_windows,
@@ -526,14 +538,16 @@ def generate_dataset_loader_from_json(cfg):
     )
     
     # Build dataloaders.
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg['train_batch_size'],
-        shuffle=True,
-        num_workers=cfg['num_workers'],
-        pin_memory=True,
-        drop_last=True
-    )
+    train_loader = None
+    if include_train:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=cfg['train_batch_size'],
+            shuffle=True,
+            num_workers=cfg['num_workers'],
+            pin_memory=True,
+            drop_last=True
+        )
     
     test_loader = DataLoader(
         test_dataset,
@@ -546,7 +560,10 @@ def generate_dataset_loader_from_json(cfg):
 
 
     
-    print(f"******* Training Windows: {len(train_windows)} -> Balanced: {len(train_dataset)}")
+    if include_train:
+        print(f"******* Training Windows: {len(train_windows)} -> Balanced: {len(train_dataset)}")
+    else:
+        print(f"******* Evaluation Windows: {len(test_dataset)}")
     
     return train_loader, test_loader, test_fake_segments
 

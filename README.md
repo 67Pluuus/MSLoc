@@ -112,7 +112,10 @@ python train.py \
 python eval.py \
     --config ./configs/XCLIP_Tasle_train.yaml \
     --model_path ../../MSLoc_assets/DeMamba/results/all_Class_4/best_acc.pth \
-    --output_dir ../../MSLoc_assets/DeMamba/results/all_Class_4/eval_train
+    --output_dir ../../MSLoc_assets/DeMamba/results/all_Class_4/eval_train \
+    --val-videos 0 \
+    --val-batch-size 32 \
+    --num-workers 4
 ```
 
 Outputs: `../../MSLoc_assets/DeMamba/results/all_Class_4/`, including `eval_train/predictions.json`.
@@ -133,7 +136,9 @@ python -m torch.distributed.run --standalone --nproc_per_node=8 trace/train_mt.p
     --global_batch_size 16 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 1 \
+    --train_videos 0 --val_videos 0 \
     --num_train_epochs 2 \
+    --max_steps -1 \
     --learning_rate 3e-5 \
     --num_frames 40 \
     --model_max_length 4096 \

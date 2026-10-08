@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import pandas as pd
-from dataloader import generate_dataset_loader_from_json
+from dataloader import generate_dataset_loader_from_json, select_video_records
 
 import models
 from util import build_model
@@ -72,7 +72,9 @@ def evaluate_trained_model(cfg, model_path, output_dir, device='cuda'):
     
     # Build the dataloaders.
     print("******* Building dataloaders *******")
-    _, val_loader, test_fake_segments = generate_dataset_loader_from_json(cfg)
+    _, val_loader, test_fake_segments = generate_dataset_loader_from_json(cfg, include_train=False)
+    if len(val_loader) == 0:
+        raise ValueError('No evaluation windows; check annotations and frame paths')
     
     # Detect binary mode.
     is_binary = cfg.get('mode', '') == 'binary'
@@ -92,6 +94,7 @@ def evaluate_trained_model(cfg, model_path, output_dir, device='cuda'):
     # Read the original test JSON.
     with open(cfg['test_json_path'], 'r', encoding='utf-8') as f:
         test_json_data = json.load(f)
+    test_json_data = select_video_records(test_json_data, cfg.get('val_videos', 0))
         
     final_results = []
     
@@ -120,7 +123,9 @@ def evaluate_trained_model(cfg, model_path, output_dir, device='cuda'):
                 
             new_item['model_inference'] = model_inference
         else:
-            # If no prediction was produced, default to real.
+            if cfg.get('val_videos', 0) > 0:
+                raise ValueError(f'No prediction produced for selected video: {video_path}')
+            # Preserve the original full-evaluation output behavior.
             new_item['model_inference'] = {
                 'type': 'real',
                 'segment': []
@@ -226,6 +231,10 @@ def main():
     parser.add_argument('--model_path', required=True, help='Path to the trained checkpoint.')
     parser.add_argument('--output_dir', required=True, help='Directory to write evaluation results to.')
     parser.add_argument('--device', default='cuda', help='Device to use (cuda/cpu).')
+    parser.add_argument('--val-videos', type=int, default=0,
+                        help='Evaluate the first N complete videos; 0 uses all videos')
+    parser.add_argument('--val-batch-size', type=int, default=None)
+    parser.add_argument('--num-workers', type=int, default=None)
     
     args = parser.parse_args()
     
@@ -236,6 +245,14 @@ def main():
     # Load the config.
     with open(args.config, 'r', encoding='utf-8') as f:
         cfg = yaml.load(f, Loader=yaml.Loader)
+    cfg['val_videos'] = args.val_videos
+    cfg['show_progress'] = True
+    if args.val_batch_size is not None:
+        cfg['val_batch_size'] = args.val_batch_size
+    if args.num_workers is not None:
+        cfg['num_workers'] = args.num_workers
+    if cfg['val_videos'] < 0 or cfg['val_batch_size'] <= 0 or cfg['num_workers'] < 0:
+        raise ValueError('Video limit and workers must be nonnegative; batch size must be positive')
     
     print("Temporal-segmentation model evaluation")
     print("=" * 50)

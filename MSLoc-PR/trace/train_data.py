@@ -69,7 +69,10 @@ def validate_interval(interval, duration, context):
 
 class ProposalDataset(Dataset):
     def __init__(self, data_path, proposal_path, data_folder, tokenizer, processor,
-                 class_to_idx, bnd_ratio=0.2, video_dtype=torch.float32, show_progress=True):
+                 class_to_idx, bnd_ratio=0.2, video_dtype=torch.float32, show_progress=True,
+                 max_videos=0):
+        if max_videos < 0:
+            raise ValueError('max_videos must be nonnegative')
         self.tokenizer = tokenizer
         self.processor = processor
         self.data_folder = Path(data_folder)
@@ -78,6 +81,16 @@ class ProposalDataset(Dataset):
         self.video_dtype = video_dtype
         self.records = load_records(data_path)
         proposals = {item['video_path']: item for item in load_records(proposal_path)}
+        self.all_video_ids = {item['video_path'] for item in self.records}
+        if max_videos > 0:
+            # Explicit debug mode selects from the PG output within this split.
+            available = [item for item in self.records if item['video_path'] in proposals]
+            self.records = available[:max_videos]
+            if not self.records:
+                raise ValueError(f'No PG predictions overlap {data_path}; generate proposals for this split')
+            if show_progress:
+                print(f'Debug videos: {len(self.records)}/{len(self.all_video_ids)} from {data_path}; '
+                      f'PG coverage={len(available)}, limit={max_videos}')
         self.video_ids = {item['video_path'] for item in self.records}
         missing = self.video_ids - proposals.keys()
         if missing:

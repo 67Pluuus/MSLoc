@@ -62,6 +62,10 @@ class TrainingArguments(transformers.TrainingArguments):
     global_batch_size: int = field(default=16)
     per_device_train_batch_size: int = field(default=2)
     per_device_eval_batch_size: int = field(default=1)
+    train_videos: int = field(default=0, metadata={
+        'help': 'Debug: use up to N training videos with PG predictions; 0 requires all videos'})
+    val_videos: int = field(default=0, metadata={
+        'help': 'Debug: use up to N validation videos with PG predictions; 0 requires all videos'})
     gradient_accumulation_steps: Optional[int] = field(default=None)
     weight_decay: float = field(default=0.0)
     warmup_ratio: float = field(default=0.03)
@@ -87,6 +91,8 @@ class TrainingArguments(transformers.TrainingArguments):
     disable_tqdm: bool = field(default=False)
 
     def __post_init__(self):
+        if self.train_videos < 0 or self.val_videos < 0:
+            raise ValueError('train_videos and val_videos must be nonnegative')
         world_size = int(os.environ.get('WORLD_SIZE', '1'))
         forward_batch = self.per_device_train_batch_size * world_size
         if self.global_batch_size <= 0 or forward_batch <= 0 or self.global_batch_size % forward_batch:
@@ -332,9 +338,9 @@ def train():
         bnd_ratio=data_args.bnd_ratio, video_dtype=dtype,
         show_progress=training_args.process_index == 0,
     )
-    train_dataset = ProposalDataset(data_args.data_path, **dataset_kwargs)
-    eval_dataset = ProposalDataset(data_args.eval_data_path, **dataset_kwargs)
-    if train_dataset.video_ids & eval_dataset.video_ids:
+    train_dataset = ProposalDataset(data_args.data_path, max_videos=training_args.train_videos, **dataset_kwargs)
+    eval_dataset = ProposalDataset(data_args.eval_data_path, max_videos=training_args.val_videos, **dataset_kwargs)
+    if train_dataset.all_video_ids & eval_dataset.all_video_ids:
         raise ValueError('Training and validation videos overlap')
     if training_args.process_index == 0:
         effective_batch = (training_args.per_device_train_batch_size * training_args.world_size
