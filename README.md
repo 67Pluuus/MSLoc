@@ -75,25 +75,25 @@ Place the Mistral-based `trace-uni` model under `MSLoc_assets/Trace/ckpts/` and 
 Extract 8-fps frames, then reserve 10% of the training videos for validation. Skip extraction if the frames are already prepared.
 
 ```bash
-cd MSLoc
+cd MSLoc/MSLoc-PG
 conda activate msloc-pg
-python MSLoc-PG/Preprocess/video2frame.py \
-    --input_root ../MSLoc_assets/data/Tasle-CoT-10K/videos \
-    --output_root ../MSLoc_assets/data/Tasle-CoT-10K/video_frames
-python scripts/prepare_train.py \
-    --anno_file ../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
-    --output_dir ../MSLoc_assets/data/Tasle-CoT-10K/annos \
+python Preprocess/video2frame.py \
+    --input_root ../../MSLoc_assets/data/Tasle-CoT-10K/videos \
+    --output_root ../../MSLoc_assets/data/Tasle-CoT-10K/video_frames
+python ../scripts/prepare_train.py \
+    --anno_file ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
+    --output_dir ../../MSLoc_assets/data/Tasle-CoT-10K/annos \
     --val_ratio 0.1 --seed 42
 ```
 
-Outputs: frames in `../MSLoc_assets/data/Tasle-CoT-10K/video_frames/`, and `msloc_train.json` / `msloc_val.json` in the annotation directory.
+Outputs: frames in `../../MSLoc_assets/data/Tasle-CoT-10K/video_frames/`, and `msloc_train.json` / `msloc_val.json` in the annotation directory.
 
 ### 2. Train MSLoc-PG and generate proposals
 
 In the `msloc-pg` environment:
 
 ```bash
-cd MSLoc-PG
+cd MSLoc/MSLoc-PG
 bash train.sh
 python eval.py \
     --config ./configs/XCLIP_Tasle_train.yaml \
@@ -109,7 +109,7 @@ Settings are in `configs/MSLoc_train.yaml`. Outputs go to
 Switch to the `msloc-pr` environment, prepare anomaly-class features, then train:
 
 ```bash
-cd ../MSLoc-PR
+cd MSLoc/MSLoc-PR
 python trace/scripts/extract_class_features.py \
     --data_path ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
     --bge_model_path ../../MSLoc_assets/Trace/bge-large-en-v1.5 \

@@ -5,7 +5,6 @@ import fnmatch
 from moviepy.editor import VideoFileClip
 import multiprocessing
 import math
-import subprocess
 
 # Defaults are RELATIVE to the MSLoc repository root.
 # You can also pass --input_root / --output_root from the CLI.
@@ -24,11 +23,14 @@ def find_video_files(root_dir, extensions=['*.mp4', '*.avi', '*.mov', '*.mkv', '
     return video_files
 
 def get_video_length(file_path):
-    video = VideoFileClip(file_path)
     try:
-        return video.duration
-    finally:
+        video = VideoFileClip(file_path)
+        duration = video.duration
         video.close()
+        return duration
+    except Exception as e:
+        print(f"Failed to read duration for {file_path}: {str(e)}")
+        return 0
 
 def process_video(video_path):
     # Video name without extension.
@@ -47,20 +49,23 @@ def process_video(video_path):
     os.makedirs(image_path, exist_ok=True)
 
     video_length = get_video_length(video_path)
-    if video_length is None or not math.isfinite(video_length) or video_length <= 0:
-        raise ValueError(f"Invalid video duration: {video_path}")
+    if video_length == 0:
+        print(f"Skipping invalid video: {video_path}")
+        return
 
     inter_val = 8
-    ffmpeg_cmd = [
-        'ffmpeg', '-nostdin', '-loglevel', 'error', '-i', video_path,
-        '-r', str(inter_val), os.path.join(image_path, 'frame_%d.jpg'),
-    ]
-    result = subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg failed for {video_path} (exit code {result.returncode}):\n{result.stderr}"
-        )
-    print(f"Frames extracted: {video_path}")
+    ffmpeg_cmd = f"ffmpeg -loglevel quiet -i \"{video_path}\" -r {inter_val} \"{image_path}/frame_%d.jpg\""
+
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(image_path)
+        return_code = os.system(ffmpeg_cmd)
+        if return_code != 0:
+            print(f"ffmpeg failed with return code {return_code}")
+        else:
+            print(f"Frames extracted: {video_path}")
+    finally:
+        os.chdir(original_cwd)
 
 
 if __name__ == '__main__':
@@ -72,19 +77,17 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=8)
     args = parser.parse_args()
 
-    INPUT_ROOT = os.path.abspath(args.input_root)
-    OUTPUT_ROOT = os.path.abspath(args.output_root)
-    if not os.path.isdir(INPUT_ROOT):
-        raise FileNotFoundError(f"Input directory does not exist: {INPUT_ROOT}")
+    INPUT_ROOT = args.input_root
+    OUTPUT_ROOT = args.output_root
 
     print(f"Extracting video frames... input={INPUT_ROOT} output={OUTPUT_ROOT}")
 
     video_files = find_video_files(INPUT_ROOT)
-    if not video_files:
-        raise ValueError(f"No videos found in {INPUT_ROOT}")
     print(f"Found {len(video_files)} video file(s)")
 
-    with multiprocessing.Pool(processes=args.num_workers) as pool:
-        pool.map(process_video, video_files)
+    pool = multiprocessing.Pool(processes=args.num_workers)
+    pool.map(process_video, video_files)
+    pool.close()
+    pool.join()
     print("All videos processed.")
 
