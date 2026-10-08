@@ -105,6 +105,7 @@ python train.py \
     --train-batch-size 32 \
     --micro-batch-size 4 \
     --val-batch-size 32 \
+    --val-videos 0 \
     --num-workers 4 \
     --seed 42 \
     --clean

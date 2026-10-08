@@ -146,6 +146,8 @@ def main():
     parser.add_argument('--micro-batch-size', type=int, default=4,
                         help='Maximum windows per GPU per forward; accumulate to train_batch_size')
     parser.add_argument('--val-batch-size', type=int, default=None)
+    parser.add_argument('--val-videos', type=int, default=0,
+                        help='Validate the first N complete videos; 0 uses all videos')
     parser.add_argument('--num-workers', type=int, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--resume', action='store_true', help='Resume the last completed epoch')
@@ -153,6 +155,8 @@ def main():
     args = parser.parse_args()
     if args.resume and args.clean:
         raise ValueError('--resume and --clean are mutually exclusive')
+    if args.val_videos < 0:
+        raise ValueError('--val-videos must be nonnegative')
 
     # Load the config.
     with open(args.config, encoding='utf-8') as handle:
@@ -165,6 +169,10 @@ def main():
     ):
         if value is not None:
             cfg[key] = value
+    if args.val_videos > 0:
+        cfg['val_videos'] = args.val_videos
+    else:
+        cfg.pop('val_videos', None)
     if cfg['max_epoch'] <= 0 or cfg['bath_per_epoch'] <= 0:
         raise ValueError('Epochs and batches per epoch must be positive')
     if not np.isfinite(cfg['lr']) or cfg['lr'] <= 0:

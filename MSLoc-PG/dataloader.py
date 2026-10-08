@@ -480,6 +480,16 @@ def generate_dataset_loader_from_json(cfg):
         train_json = json.load(f)
     with open(cfg['test_json_path'], 'r') as f:
         test_json = json.load(f)
+
+    # Keep complete videos so localization metrics never use truncated windows.
+    val_videos = cfg.get('val_videos', 0)
+    if val_videos < 0:
+        raise ValueError('val_videos must be nonnegative')
+    if val_videos > 0:
+        video_paths = list(dict.fromkeys(item['video_path'] for item in test_json))
+        selected_paths = set(video_paths[:val_videos])
+        test_json = [item for item in test_json if item['video_path'] in selected_paths]
+        print(f'Validation videos: {len(selected_paths)}/{len(video_paths)} (limit={val_videos})')
     
     # Convert to per-window samples.
     train_windows = parse_json_to_windows(
