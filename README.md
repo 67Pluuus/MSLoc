@@ -139,6 +139,10 @@ python -m torch.distributed.run --standalone --nproc_per_node=8 trace/train_mt.p
     --train_videos 0 --val_videos 0 \
     --num_train_epochs 2 \
     --max_steps -1 \
+    --evaluation_strategy epoch \
+    --save_strategy epoch \
+    --save_steps 500 \
+    --logging_steps 1 \
     --learning_rate 3e-5 \
     --num_frames 40 \
     --model_max_length 4096 \
