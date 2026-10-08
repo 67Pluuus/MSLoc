@@ -14,8 +14,8 @@ lr: 0.000001
 
 
 # Path are relative to MSLoc/DeMamba (the working dir for train.py / eval.py)
-train_json_path: '../../MSLoc_assets/data/Tasle-CoT-10K/annos/train.json'
-test_json_path: '../../MSLoc_assets/data/Tasle-CoT-10K/annos/test.json'
+train_json_path: '../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '../../MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json'
 dataset_base_path: '../../MSLoc_assets/data/Tasle-CoT-10K/video_frames'
 window_length: 2.0
 frames_per_window: 8

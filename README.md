@@ -27,8 +27,8 @@ The repository contains code only.  Download TASLE and backbone from [ModelScope
     ├── data/
     │   └── Tasle-CoT-10K/
     │       ├── annos/
-    │       │   ├── train.json
-    │       │   └── test.json
+    │       │   ├── train_all_1209.json
+    │       │   └── test_all_1209_0119.json
     │       ├── videos/
     │       └── video_frames/
     ├── DeMamba/
@@ -75,7 +75,7 @@ Place the Mistral-based `trace-uni` model under `MSLoc_assets/Trace/ckpts/` and 
 
 ### 1. Prepare data
 
-Extract 8-fps frames, then reserve 10% of `annos/train.json` for validation. Skip extraction if the frames are already prepared.
+Extract 8-fps frames, then reserve 10% of `annos/train_all_1209.json` for validation. Skip extraction if the frames are already prepared.
 
 ```bash
 cd MSLoc/MSLoc-PG
@@ -84,7 +84,7 @@ python Preprocess/video2frame.py \
     --input_root ../../MSLoc_assets/data/Tasle-CoT-10K/videos \
     --output_root ../../MSLoc_assets/data/Tasle-CoT-10K/video_frames
 python ../scripts/prepare_train.py \
-    --anno_file ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train.json \
+    --anno_file ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
     --output_dir ../../MSLoc_assets/data/Tasle-CoT-10K/annos \
     --val_ratio 0.1 --seed 42
 ```
@@ -114,7 +114,7 @@ Switch to the `msloc-pr` environment, prepare anomaly-class features, then train
 ```bash
 cd MSLoc/MSLoc-PR
 python trace/scripts/extract_class_features.py \
-    --data_path ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train.json \
+    --data_path ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
     --bge_model_path ../../MSLoc_assets/Trace/bge-large-en-v1.5 \
     --output_path ../../MSLoc_assets/Trace/class_features_bge.pt \
     --device cuda --batch_size 32
@@ -190,11 +190,11 @@ bash scripts/eval/ref2_eval.sh
 ```bash
 cd MSLoc
 python scripts/evaluate_long.py \
-    --gt_file    ../MSLoc_assets/data/Tasle-CoT-10K/annos/test.json \
+    --gt_file    ../MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
     --infer_file ../MSLoc_assets/Trace/inference_results/ref2_aigc_test/fmt_aigc_test_f40_result.json
 ```
 
-The evaluator requires predictions for exactly the videos in `test.json`. It reports:
+Use `test_all_1209_0119.json` as ground truth for long-video evaluation. It reports:
 
 - `Det_Acc`: video-level detection accuracy.
 - `Loc_F1`: temporal-grid F1 at the released 0.01-second resolution.
@@ -208,7 +208,7 @@ The evaluator requires predictions for exactly the videos in `test.json`. It rep
 | `all_Class_4/eval/predictions.json` | `MSLoc-PG/eval.py` | `MSLoc-PR/trace/eval/evaluate_ref.py` |
 | `ref2_aigc_test/fmt_aigc_test_f40_result.json` | `MSLoc-PR/scripts/eval/ref2_eval.sh` | `scripts/evaluate_long.py` |
 
-The official inference split is `MSLoc_assets/data/Tasle-CoT-10K/annos/test.json`. Training annotations, `test_add.json`, and segment-classification annotations are not used by this retained path.
+MSLoc-PG testing and final long-video metrics use `MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json`.
 
 ## License
 
