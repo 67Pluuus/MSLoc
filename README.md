@@ -65,6 +65,62 @@ pip install -r MSLoc-PR/requirements.txt
 
 Install PyTorch and torchvision wheels matching the local CUDA driver when necessary.
 
+## Training
+
+Use the environments and asset layout above.
+Place the Mistral-based `trace-uni` model under `MSLoc_assets/Trace/ckpts/` and BGE under `MSLoc_assets/Trace/bge-large-en-v1.5/`.
+
+### 1. Prepare data
+
+Extract 8-fps frames, then reserve 10% of the training videos for validation. Skip extraction if the frames are already prepared.
+
+```bash
+cd MSLoc
+conda activate msloc-pg
+python MSLoc-PG/Preprocess/video2frame.py \
+    --input_root ../MSLoc_assets/data/Tasle-CoT-10K/videos \
+    --output_root ../MSLoc_assets/data/Tasle-CoT-10K/video_frames
+python scripts/prepare_train.py \
+    --anno_file ../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
+    --output_dir ../MSLoc_assets/data/Tasle-CoT-10K/annos \
+    --val_ratio 0.1 --seed 42
+```
+
+Outputs: frames in `../MSLoc_assets/data/Tasle-CoT-10K/video_frames/`, and `msloc_train.json` / `msloc_val.json` in the annotation directory.
+
+### 2. Train MSLoc-PG and generate proposals
+
+In the `msloc-pg` environment:
+
+```bash
+cd MSLoc-PG
+bash train.sh
+python eval.py \
+    --config ./configs/XCLIP_Tasle_train.yaml \
+    --model_path ../../MSLoc_assets/DeMamba/results/all_Class_4/best_acc.pth \
+    --output_dir ../../MSLoc_assets/DeMamba/results/all_Class_4/eval_train
+```
+
+Settings are in `configs/MSLoc_train.yaml`. Outputs go to
+`../../MSLoc_assets/DeMamba/results/all_Class_4/`, including `eval_train/predictions.json`.
+
+### 3. Train MSLoc-PR
+
+Switch to the `msloc-pr` environment, prepare anomaly-class features, then train:
+
+```bash
+cd ../MSLoc-PR
+python trace/scripts/extract_class_features.py \
+    --data_path ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
+    --bge_model_path ../../MSLoc_assets/Trace/bge-large-en-v1.5 \
+    --output_path ../../MSLoc_assets/Trace/class_features_bge.pt \
+    --device cuda --batch_size 32
+bash scripts/train/ref2.sh
+```
+
+This enables DAM, EAM and anomaly-aware loss with 40 frames, 2 epochs, effective batch size 16 and learning rate `3e-5`.
+Training outputs go to `../../MSLoc_assets/Trace/output/trace_vllava/ref2/`.
+
 ## Best-result inference
 
 ### 1. Extract 8-fps frames

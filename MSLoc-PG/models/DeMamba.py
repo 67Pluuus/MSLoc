@@ -115,7 +115,8 @@ class MambaBlock(nn.Module):
         with torch.no_grad():
             self.dt_proj.bias.copy_(inv_dt)
 
-        # S4D real initialization        A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
+        # S4D real initialization
+        A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
         self.A_log = nn.Parameter(torch.log(A)) # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
         self.D = nn.Parameter(torch.ones(config.d_inner))
 
