@@ -172,6 +172,8 @@ def prepare_training_output(model_args, data_args, training_args):
                 raise ValueError('--clean and --resume_from_checkpoint are mutually exclusive')
             if training_args.overwrite_output_dir:
                 raise ValueError('Use --clean to restart; overwrite_output_dir can leave stale checkpoints')
+            if output_dir.exists() and not output_dir.is_dir():
+                raise NotADirectoryError(f'Training output path is not a directory: {output_dir}')
             marker = output_dir / 'msloc_training.json'
             if training_args.clean:
                 protected = [model_args.model_name_or_path, model_args.vision_tower,
@@ -179,6 +181,7 @@ def prepare_training_output(model_args, data_args, training_args):
                              data_args.proposal_path, data_args.data_folder, project_root]
                 if any(Path(path).resolve().is_relative_to(output_dir) for path in protected):
                     raise ValueError('The output directory contains model, data or code inputs')
+            if training_args.clean and output_dir.is_dir() and any(output_dir.iterdir()):
                 owned = marker.is_file() and json.loads(marker.read_text()) == {'stage': 'MSLoc-PR'}
                 # Recognize runs saved before the training marker was introduced.
                 if not owned and (output_dir / 'config.json').is_file():
@@ -187,7 +190,8 @@ def prepare_training_output(model_args, data_args, training_args):
                              and config.get('mm_projector_type') == 'ref_projector'
                              and (output_dir / 'training_args.bin').is_file())
                 if not owned:
-                    raise ValueError('--clean requires a recognized MSLoc-PR training output directory')
+                    raise ValueError(f'Cannot clean nonempty, unrecognized training directory: {output_dir}; '
+                                     'use a different --output_dir or move existing files before restarting')
                 marker.write_text(json.dumps({'stage': 'MSLoc-PR'}), encoding='utf-8')
                 for path in output_dir.iterdir():
                     if path == marker:
