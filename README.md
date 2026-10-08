@@ -99,7 +99,15 @@ cd MSLoc/MSLoc-PG
 python train.py \
     --config ./configs/MSLoc_train.yaml \
     --device-ids 0,1,2,3,4,5,6,7 \
-    --micro-batch-size 4 --num-workers 4 --seed 42
+    --epochs 10 \
+    --lr 1e-6 \
+    --batches-per-epoch 1000 \
+    --train-batch-size 32 \
+    --micro-batch-size 4 \
+    --val-batch-size 32 \
+    --num-workers 4 \
+    --seed 42 \
+    --clean
 python eval.py \
     --config ./configs/XCLIP_Tasle_train.yaml \
     --model_path ../../MSLoc_assets/DeMamba/results/all_Class_4/best_acc.pth \
@@ -121,9 +129,18 @@ python trace/scripts/extract_class_features.py \
     --output_path ../../MSLoc_assets/Trace/class_features_bge.pt \
     --device cuda --batch_size 32
 python -m torch.distributed.run --standalone --nproc_per_node=8 trace/train_mt.py \
-    --global_batch_size 16 --per_device_train_batch_size 2 \
-    --num_train_epochs 2 --learning_rate 3e-5 \
-    --dataloader_num_workers 4 --report_to none --seed 42 --data_seed 42
+    --global_batch_size 16 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 1 \
+    --num_train_epochs 2 \
+    --learning_rate 3e-5 \
+    --num_frames 40 \
+    --model_max_length 4096 \
+    --dataloader_num_workers 4 \
+    --bf16 True \
+    --report_to none \
+    --seed 42 --data_seed 42 \
+    --clean
 ```
 
 Outputs: `../../MSLoc_assets/Trace/output/trace_vllava/ref2/`.

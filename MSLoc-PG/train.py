@@ -132,6 +132,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='./configs/MSLoc_train.yaml')
     parser.add_argument('--device-ids', default='0,1,2,3,4,5,6,7')
+    parser.add_argument('--epochs', type=int, default=None)
+    parser.add_argument('--lr', type=float, default=None)
+    parser.add_argument('--train-batch-size', type=int, default=None,
+                        help='Effective batch size per optimizer update across all GPUs')
+    parser.add_argument('--batches-per-epoch', type=int, default=None,
+                        help='Maximum optimizer updates per epoch')
     parser.add_argument('--micro-batch-size', type=int, default=4,
                         help='Maximum windows per GPU per forward; accumulate to train_batch_size')
     parser.add_argument('--val-batch-size', type=int, default=None)
@@ -146,10 +152,18 @@ def main():
     # Load the config.
     with open(args.config, encoding='utf-8') as handle:
         cfg = yaml.safe_load(handle)
-    if args.val_batch_size is not None:
-        cfg['val_batch_size'] = args.val_batch_size
-    if args.num_workers is not None:
-        cfg['num_workers'] = args.num_workers
+    for key, value in (
+        ('max_epoch', args.epochs), ('lr', args.lr),
+        ('train_batch_size', args.train_batch_size),
+        ('bath_per_epoch', args.batches_per_epoch),
+        ('val_batch_size', args.val_batch_size), ('num_workers', args.num_workers),
+    ):
+        if value is not None:
+            cfg[key] = value
+    if cfg['max_epoch'] <= 0 or cfg['bath_per_epoch'] <= 0:
+        raise ValueError('Epochs and batches per epoch must be positive')
+    if not np.isfinite(cfg['lr']) or cfg['lr'] <= 0:
+        raise ValueError('Learning rate must be positive and finite')
 
     os.environ.setdefault('XCLIP_WEIGHTS_PATH',
                           '../../MSLoc_assets/DeMamba/pretrained_weights/xclip-base-patch16')
