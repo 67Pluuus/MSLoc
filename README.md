@@ -58,15 +58,31 @@ pip install -r MSLoc-PG/requirements.txt
 
 ### Stage 2: MSLoc-PR
 
-MSLoc-PR inference requires CUDA/Linux.
+MSLoc-PR training and inference require Linux and an NVIDIA GPU. Use PyTorch 2.1.2 with CUDA 12.1 for the existing DeepSpeed 0.13.1 dependencies.
 
 ```bash
 conda create -n msloc-pr python=3.10 -y
 conda activate msloc-pr
-pip install -r MSLoc-PR/requirements.txt
+python -m pip install setuptools==69.5.1 wheel==0.43.0 numpy==1.26.4 ninja packaging
+python -m pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 \
+    --index-url https://download.pytorch.org/whl/cu121
+python -m pip install --no-build-isolation -r MSLoc-PR/requirements.txt \
+    torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 \
+    numpy==1.26.4 huggingface-hub==0.23.4 \
+    nvidia-cuda-runtime-cu12==12.1.105 nvidia-cublas-cu12==12.1.3.1 \
+    nvidia-cusparse-cu12==12.1.0.106 nvidia-nvjitlink-cu12==12.1.105
 ```
 
-Install PyTorch and torchvision wheels matching the local CUDA driver when necessary.
+Locate the pip-installed CUDA libraries and save their search paths for bitsandbytes; Conda applies them on activation.
+
+```bash
+MSLOC_NVIDIA_DIR=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/nvidia")')
+MSLOC_CUDA_LIBS="${MSLOC_NVIDIA_DIR}/cuda_runtime/lib:${MSLOC_NVIDIA_DIR}/cublas/lib:${MSLOC_NVIDIA_DIR}/cusparse/lib:${MSLOC_NVIDIA_DIR}/nvjitlink/lib"
+conda env config vars set LD_LIBRARY_PATH="${MSLOC_CUDA_LIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+conda deactivate
+conda activate msloc-pr
+python -c "import torch, cv2, bitsandbytes, deepspeed; from transformers import Trainer; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))"
+```
 
 ## Training
 
