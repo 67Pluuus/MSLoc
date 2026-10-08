@@ -56,25 +56,30 @@ def train_model(cfg, args):
     state_path = output_dir / 'training_state.pth'
     config_path = output_dir / 'training_config.yaml'
     run_config = dict(cfg, seed=args.seed)
+    # Use the same file set for cleanup and existing-run detection.
+    training_outputs = sorted(
+        path for path in output_dir.iterdir()
+        if path.suffix == '.pth'
+        or path.name in {'training_state.tmp', 'training_config.yaml'}
+        or (path.name.startswith('Epoch_') and path.name.endswith('_accuracy.txt'))
+    )
     if args.clean:
-        if not config_path.is_file():
-            raise ValueError('--clean requires an output directory created by this training entry point')
-        # Remove training outputs only.
-        for path in output_dir.iterdir():
-            if path.is_file() and (
-                path.name in {'training_state.pth', 'training_state.tmp', 'training_config.yaml', 'best_acc.pth'}
-                or (path.suffix == '.pth' and path.stem.isdecimal())
-                or (path.name.startswith('Epoch_') and path.name.endswith('_accuracy.txt'))
-            ):
-                path.unlink()
+        unexpected = [path.name for path in training_outputs
+                      if not path.is_file() and not path.is_symlink()]
+        if unexpected:
+            raise ValueError(f'Expected training files, found directories: {unexpected}')
+        for path in training_outputs:
+            path.unlink()
+        print(f'Cleaned {len(training_outputs)} training files in {output_dir}')
     if args.resume:
         if not state_path.is_file() or not config_path.is_file():
             raise FileNotFoundError(f'No resumable run in {output_dir}')
         with config_path.open(encoding='utf-8') as handle:
             if yaml.safe_load(handle) != run_config:
                 raise ValueError('Resume requires the original training configuration and seed')
-    elif config_path.exists() or any(output_dir.glob('*.pth')):
-        raise FileExistsError(f'Training outputs already exist in {output_dir}; use --resume or --clean')
+    elif training_outputs and not args.clean:
+        names = ', '.join(path.name for path in training_outputs)
+        raise FileExistsError(f'Training outputs already exist in {output_dir}: {names}; use --resume or --clean')
     with config_path.open('w', encoding='utf-8') as handle:
         yaml.safe_dump(run_config, handle, sort_keys=False)
 
