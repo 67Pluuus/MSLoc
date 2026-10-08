@@ -113,8 +113,8 @@ python eval.py \
     --config ./configs/XCLIP_Tasle_train.yaml \
     --model_path ../../MSLoc_assets/DeMamba/results/all_Class_4/best_acc.pth \
     --output_dir ../../MSLoc_assets/DeMamba/results/all_Class_4/eval_train \
-    --val-videos 0 \
-    --val-batch-size 32 \
+    --max-videos 0 \
+    --batch-size 32 \
     --num-workers 4
 ```
 

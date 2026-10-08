@@ -231,9 +231,9 @@ def main():
     parser.add_argument('--model_path', required=True, help='Path to the trained checkpoint.')
     parser.add_argument('--output_dir', required=True, help='Directory to write evaluation results to.')
     parser.add_argument('--device', default='cuda', help='Device to use (cuda/cpu).')
-    parser.add_argument('--val-videos', type=int, default=0,
+    parser.add_argument('--max-videos', '--val-videos', dest='max_videos', type=int, default=0,
                         help='Evaluate the first N complete videos; 0 uses all videos')
-    parser.add_argument('--val-batch-size', type=int, default=None)
+    parser.add_argument('--batch-size', '--val-batch-size', dest='batch_size', type=int, default=None)
     parser.add_argument('--num-workers', type=int, default=None)
     
     args = parser.parse_args()
@@ -245,10 +245,10 @@ def main():
     # Load the config.
     with open(args.config, 'r', encoding='utf-8') as f:
         cfg = yaml.load(f, Loader=yaml.Loader)
-    cfg['val_videos'] = args.val_videos
+    cfg['val_videos'] = args.max_videos
     cfg['show_progress'] = True
-    if args.val_batch_size is not None:
-        cfg['val_batch_size'] = args.val_batch_size
+    if args.batch_size is not None:
+        cfg['val_batch_size'] = args.batch_size
     if args.num_workers is not None:
         cfg['num_workers'] = args.num_workers
     if cfg['val_videos'] < 0 or cfg['val_batch_size'] <= 0 or cfg['num_workers'] < 0:
