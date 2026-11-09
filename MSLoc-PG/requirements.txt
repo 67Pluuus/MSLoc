@@ -1,7 +1,7 @@
 # MSLoc-PG inference environment (DeMamba backbone).
 # For CUDA, install the torch/torchvision wheel that matches your driver first if needed.
-torch>=2.0.1,<2.2
-torchvision>=0.15.2,<0.17
+torch>=2.1.2,<2.6
+torchvision>=0.16.2,<0.21
 
 transformers==4.40.1
 ftfy
@@ -16,3 +16,4 @@ tqdm>=4.64.0
 moviepy==1.0.3
 setuptools==81.0.0
 pillow>=9.0.0
+matplotlib==3.8.4

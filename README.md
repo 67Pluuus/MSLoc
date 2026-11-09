@@ -29,11 +29,11 @@ The repository contains code only.  Download TASLE and backbone from [ModelScope
     │       ├── annos/
     │       │   ├── train_all_1209.json
     │       │   └── test_all_1209_0119.json
-    │       ├── videos/
-    │       └── video_frames/
+    │       └── videos/
     ├── DeMamba/
+    │   ├── video_frames/
     │   ├── pretrained_weights/xclip-base-patch16/
-    │   └── results/all_Class_4/  # training outputs
+    │   └── full/baseline/results/  # PG training outputs
     └── Trace/
         ├── ckpts/trace-uni/
         ├── ckpts/clip-vit-large-patch14-336/
@@ -50,10 +50,12 @@ MSLoc-PG and MSLoc-PR use separate environments.
 
 ### Stage 1: MSLoc-PG
 
+Run PG commands from the `MSLoc/` repository root.
+
 ```bash
 conda create -n msloc-pg python=3.10 -y
 conda activate msloc-pg
-pip install -r MSLoc-PG/requirements.txt
+python -m pip install -r MSLoc-PG/requirements.txt torch==2.1.2 torchvision==0.16.2
 ```
 
 ### Stage 2: MSLoc-PR
@@ -88,54 +90,34 @@ python -c "import torch, cv2, bitsandbytes, deepspeed; from transformers import 
 
 Use the environments and asset layout above, with the Mistral-based `trace-uni` model.
 
-### 1. Prepare data
+### 1. Prepare data for MSLoc-PG
 
-Extract 8-fps frames (skip if prepared) and reserve 10% of training videos for validation.
+Place TASLE under `../MSLoc_assets/data/Tasle-CoT-10K/`, then prepare the backbone and 8-fps frames:
 
 ```bash
-cd MSLoc/MSLoc-PG
-conda activate msloc-pg
-python Preprocess/video2frame.py \
-    --input_root ../../MSLoc_assets/data/Tasle-CoT-10K/videos \
-    --output_root ../../MSLoc_assets/data/Tasle-CoT-10K/video_frames
-python ../scripts/prepare_train.py \
-    --anno_file ../../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json \
-    --output_dir ../../MSLoc_assets/data/Tasle-CoT-10K/annos \
-    --val_ratio 0.1 --seed 42
+hf download microsoft/xclip-base-patch16 --local-dir ../MSLoc_assets/DeMamba/pretrained_weights/xclip-base-patch16
+python MSLoc-PG/Preprocess/video2frame.py \
+    --input_root ../MSLoc_assets/data/Tasle-CoT-10K/videos \
+    --output_root ../MSLoc_assets/DeMamba/video_frames \
+    --annotations ../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json ../MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+    --num_workers 8 --max-videos 0
 ```
 
-Outputs: `video_frames/` and `annos/msloc_train.json` / `annos/msloc_val.json` under the dataset directory.
+Output: `../MSLoc_assets/DeMamba/video_frames/`. Completed extractions are reused.
 
-### 2. Train MSLoc-PG and generate proposals
+### 2. Train MSLoc-PG
 
-In the `msloc-pg` environment:
+Train XCLIP/DeMamba for 10 epochs, using batch 32 and seed 42.
 
 ```bash
-cd MSLoc/MSLoc-PG
-python train.py \
-    --config ./configs/MSLoc_train.yaml \
+python MSLoc-PG/train.py \
+    --config MSLoc-PG/configs/xclip_baseline_full.yaml \
     --device-ids 0,1,2,3,4,5,6,7 \
-    --epochs 10 \
-    --lr 1e-6 \
-    --batches-per-epoch 1000 \
-    --train-batch-size 32 \
-    --micro-batch-size 4 \
-    --val-batch-size 32 \
-    --val-videos 0 \
-    --num-workers 4 \
-    --seed 42 \
-    --clean
-python eval.py \
-    --config ./configs/XCLIP_Tasle_train.yaml \
-    --model_path ../../MSLoc_assets/DeMamba/results/all_Class_4/best_acc.pth \
-    --output_dir ../../MSLoc_assets/DeMamba/results/all_Class_4/eval_train \
-    --max-videos 0 \
-    --batch-size 32 \
-    --num-workers 4
+    --train-batch-size 32 --val-batch-size 32 --max-epoch 10 \
+    --train-videos 0 --val-videos 0 --seed 42
 ```
 
-Outputs: `../../MSLoc_assets/DeMamba/results/all_Class_4/`, including `eval_train/predictions.json`.
-Single GPU: `--device-ids 0` (effective batch 32). Resume: `--resume`.
+Outputs: `../MSLoc_assets/DeMamba/full/baseline/results/`, including `best_acc.pth`, `training_state.pth` and `training_curves.png`. Weights are saved before validation. Add `--resume` to continue saved training or pending validation; use `--clean` to replace this run's outputs.
 
 ### 3. Train MSLoc-PR
 
@@ -176,31 +158,43 @@ Single GPU: `--nproc_per_node=1` (effective batch 16). Resume: `--resume_from_ch
 
 ### 1. Extract 8-fps frames
 
-Run once before Stage 1:
+Use the PG data-preparation command above if frames have not been extracted.
+
+### 2. Evaluate MSLoc-PG and export proposals
+
+Evaluate the best checkpoint on `test_all_1209_0119.json` and export proposals for MSLoc-PR:
 
 ```bash
-cd MSLoc/MSLoc-PG
-python Preprocess/video2frame.py \
-    --input_root  ../../MSLoc_assets/data/Tasle-CoT-10K/videos \
-    --output_root ../../MSLoc_assets/data/Tasle-CoT-10K/video_frames
+python MSLoc-PG/eval.py \
+    --config MSLoc-PG/configs/xclip_baseline_full.yaml \
+    --model_path ../MSLoc_assets/DeMamba/full/baseline/results/best_acc.pth \
+    --output_dir ../MSLoc_assets/DeMamba/full/baseline/eval \
+    --device-ids 0,1,2,3,4,5,6,7 \
+    --val-batch-size 16 --max-videos 0 --seed 42
 ```
 
-The extractor resolves both roots before starting workers and reprocesses incomplete frame directories.
+Outputs: `predictions.json` for MSLoc-PR, `summary_results.json` with full-test F1Det/F1Loc, and per-video reports under `../MSLoc_assets/DeMamba/full/baseline/eval/`.  Add `--resume` to reuse completed inference batches.
 
-### 2. Generate four-class proposals
+Report seen/unseen/mixed metrics in the terminal:
 
 ```bash
-cd MSLoc/MSLoc-PG
-bash eval.sh
+python scripts/evaluate_long.py \
+    --gt_file ../MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+    --infer_file ../MSLoc_assets/DeMamba/full/baseline/eval/predictions.json
 ```
 
-The classifier uses 2-second windows with 8 sampled frames. Its classes are `0=real`, `1=fake`, `2=real-to-fake`, and `3=fake-to-real`.
+To export training proposals for MSLoc-PR:
 
-The proposal file is written to:
-
-```text
-MSLoc_assets/DeMamba/results/all_Class_4/eval/predictions.json
+```bash
+python MSLoc-PG/eval.py \
+    --config MSLoc-PG/configs/xclip_baseline_full.yaml \
+    --model_path ../MSLoc_assets/DeMamba/full/baseline/results/best_acc.pth \
+    --output_dir ../MSLoc_assets/DeMamba/full/baseline/eval_train \
+    --device-ids 0,1,2,3,4,5,6,7 \
+    --val-batch-size 16 --max-videos 0 --seed 42 --eval-split train
 ```
+
+Output: `../MSLoc_assets/DeMamba/full/baseline/eval_train/predictions.json`.
 
 ### 3. Run TRACE/MSLoc-PR inference
 
@@ -253,10 +247,10 @@ Use `test_all_1209_0119.json` as ground truth for long-video evaluation. It repo
 | Artifact | Producer | Consumer |
 | --- | --- | --- |
 | `video_frames/` | `MSLoc-PG/Preprocess/video2frame.py` | `MSLoc-PG/eval.py` |
-| `all_Class_4/eval/predictions.json` | `MSLoc-PG/eval.py` | `MSLoc-PR/trace/eval/evaluate_ref.py` |
+| `full/baseline/eval/predictions.json` | `MSLoc-PG/eval.py` | `MSLoc-PR/trace/eval/evaluate_ref.py` |
 | `ref2_aigc_test/fmt_aigc_test_f40_result.json` | `MSLoc-PR/scripts/eval/ref2_eval.sh` | `scripts/evaluate_long.py` |
 
-MSLoc-PG testing and final long-video metrics use `MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json`.
+MSLoc-PG evaluation uses `MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json`.
 
 ## License
 

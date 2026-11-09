@@ -50,7 +50,7 @@ class PScan(torch.autograd.Function):
         # which are computed in parallel (2*log2(T) sequential steps (ideally), instead of T sequential steps)
 
         # only supports L that is a power of two (mainly for a clearer code)
-        
+
         B, D, L, _ = A.size()
         num_steps = int(math.log2(L))
 
@@ -61,7 +61,7 @@ class PScan(torch.autograd.Function):
             T = Xa.size(2)
             Aa = Aa.view(B, D, T//2, 2, -1)
             Xa = Xa.view(B, D, T//2, 2, -1)
-            
+
             Xa[:, :, :, 1].add_(Aa[:, :, :, 1].mul(Xa[:, :, :, 0]))
             Aa[:, :, :, 1].mul_(Aa[:, :, :, 0])
 
@@ -118,7 +118,7 @@ class PScan(torch.autograd.Function):
             T = Xa.size(2)
             Aa = Aa.view(B, D, T//2, 2, -1)
             Xa = Xa.view(B, D, T//2, 2, -1)
-                    
+
             Xa[:, :, :, 0].add_(Aa[:, :, :, 0].mul(Xa[:, :, :, 1]))
             Aa[:, :, :, 0].mul_(Aa[:, :, :, 1])
 
@@ -178,7 +178,7 @@ class PScan(torch.autograd.Function):
             # pad tensors (and clone btw)
             A = pad_npo2(A_in) # (B, npo2(L), D, N)
             X = pad_npo2(X_in) # (B, npo2(L), D, N)
-        
+
         # prepare tensors
         A = A.transpose(2, 1) # (B, D, npo2(L), N)
         X = X.transpose(2, 1) # (B, D, npo2(L), N)
@@ -187,10 +187,10 @@ class PScan(torch.autograd.Function):
         PScan.pscan(A, X)
 
         ctx.save_for_backward(A_in, X)
-        
+
         # slice [:, :L] (cut if there was padding)
         return X.transpose(2, 1)[:, :L]
-    
+
     @staticmethod
     def backward(ctx, grad_output_in):
         """
@@ -228,7 +228,5 @@ class PScan(torch.autograd.Function):
         Q[:, :, 1:].add_(X[:, :, :-1] * grad_output[:, :, 1:])
 
         return Q.transpose(2, 1)[:, :L], grad_output.transpose(2, 1)[:, :L]
-    
+
 pscan = PScan.apply
-
-

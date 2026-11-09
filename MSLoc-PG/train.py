@@ -1,187 +1,174 @@
-import argparse
-import json
-import os
+"""Train MSLoc-PG with boundary-aware four-class supervision."""
 import random
-import warnings
+import json
 from pathlib import Path
-
-import numpy as np
-import torch
+from runtime import prepare_run, restore_rng, save_training_state, save_json, plot_history
+import argparse
 import yaml
-from torch.optim.lr_scheduler import MultiStepLR
-
-from dataloader import generate_dataset_loader_from_json
+import torch
+import numpy as np
+import os
+import util
 from util import build_model, train_one_epoch
+from dataloader import generate_dataset_loader_from_json
+import torch.nn as nn
+from torch.optim.lr_scheduler import StepLR, LambdaLR, MultiStepLR
 
 
-def train_model(cfg, args):
-    """Train the four-class DeMamba model."""
-    if cfg['model'] != 'XCLIP_DeMamba_4' or cfg['mode'] != 'four_class':
-        raise ValueError('MSLoc-PG training requires the boundary-aware four-class model')
-    if cfg['tuning_mode'] != 'sft':
-        raise ValueError('This entry point trains the standard DeMamba model with SFT')
-    if cfg['window_length'] != 2.0 or cfg['frames_per_window'] != 8:
-        raise ValueError('MSLoc-PG uses 2-second windows and 8 frames per window')
-    with open(cfg['train_json_path'], encoding='utf-8') as handle:
-        train_ids = {item['video_path'] for item in json.load(handle)}
-    with open(cfg['test_json_path'], encoding='utf-8') as handle:
-        val_ids = {item['video_path'] for item in json.load(handle)}
-    if not train_ids or not val_ids or train_ids & val_ids:
-        raise ValueError('Training and validation must contain nonempty, disjoint video sets')
-    # Stop on missing or unreadable data.
-    warnings.filterwarnings('error', category=UserWarning, module='dataloader')
+def parse_device_ids(value):
+    """Parse explicit CUDA device IDs, e.g. ``0`` or ``0,1,...,7``."""
+    try:
+        device_ids = [int(item.strip()) for item in value.split(',') if item.strip()]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError('--device-ids must be comma-separated integers') from error
+    if not device_ids or len(set(device_ids)) != len(device_ids) or min(device_ids) < 0:
+        raise argparse.ArgumentTypeError('--device-ids must contain unique non-negative integers')
+    return device_ids
 
-    # Set the random seed and devices.
+
+def get_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', dest='config', required=True, help='settings of detector in yaml format')
+    parser.add_argument('--device-ids', default='0,1,2,3,4,5,6,7',
+                        help='CUDA device IDs: 0 for one GPU, or 0,1,2,3,4,5,6,7 for eight GPUs')
+    parser.add_argument('--train-batch-size', type=int, default=None,
+                        help='Optional override for cfg.train_batch_size')
+    parser.add_argument('--val-batch-size', type=int, default=None,
+                        help='Optional override for cfg.val_batch_size')
+    parser.add_argument('--micro-batch-size', type=int, default=0,
+                        help='Windows per training forward across selected GPUs; 0 disables accumulation.')
+    parser.add_argument('--eval-micro-batch-size', type=int, default=0,
+                        help='Windows per evaluation forward; 0 uses the complete logical batch.')
+    parser.add_argument('--max-epoch', type=int, default=None,
+                        help='Optional override for cfg.max_epoch')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducible training')
+    parser.add_argument('--resume', action='store_true', help='Resume saved training or pending validation.')
+    parser.add_argument('--clean', action='store_true', help='Remove this run\'s generated outputs.')
+    parser.add_argument('--train-videos', type=int, default=0, help='0 uses all training videos.')
+    parser.add_argument('--val-videos', type=int, default=0, help='0 uses all evaluation videos.')
+    args = parser.parse_args()
+    args.device_ids = parse_device_ids(args.device_ids)
+    return args
+
+
+if __name__ == '__main__':
+    args = get_arguments()
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    device_ids = [int(value) for value in args.device_ids.split(',')]
-    if (not torch.cuda.is_available() or not device_ids or min(device_ids) < 0
-            or max(device_ids) >= torch.cuda.device_count()
-            or len(set(device_ids)) != len(device_ids)):
-        raise ValueError(f'Invalid CUDA device IDs: {args.device_ids}')
-    torch.cuda.set_device(device_ids[0])
-    if args.micro_batch_size <= 0:
-        raise ValueError('--micro-batch-size must be positive')
-    micro_batch_size = min(cfg['train_batch_size'], args.micro_batch_size * len(device_ids))
-    if cfg['train_batch_size'] <= 0 or cfg['val_batch_size'] <= 0 or cfg['num_workers'] < 0:
-        raise ValueError('Batch sizes must be positive and num_workers must be nonnegative')
-
-    # Prepare the output directory.
-    output_dir = Path(cfg['save_dir'])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    state_path = output_dir / 'training_state.pth'
-    config_path = output_dir / 'training_config.yaml'
-    run_config = dict(cfg, seed=args.seed)
-    # Use the same file set for cleanup and existing-run detection.
-    training_outputs = sorted(
-        path for path in output_dir.iterdir()
-        if path.suffix == '.pth'
-        or path.name in {'training_state.tmp', 'training_config.yaml'}
-        or (path.name.startswith('Epoch_') and path.name.endswith('_accuracy.txt'))
+    assert (os.path.exists(args.config))
+    cfg = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
+    for key, value in (('train_batch_size', args.train_batch_size),
+                       ('val_batch_size', args.val_batch_size),
+                       ('max_epoch', args.max_epoch)):
+        if value is not None:
+            if value <= 0:
+                raise ValueError(f'--{key.replace("_", "-")} must be positive')
+            cfg[key] = value
+    if args.train_videos < 0 or args.val_videos < 0:
+        raise ValueError('Video limits must be non-negative')
+    cfg.update(train_videos=args.train_videos, val_videos=args.val_videos, device_ids=args.device_ids)
+    if args.micro_batch_size < 0 or args.eval_micro_batch_size < 0:
+        raise ValueError('Micro-batch sizes must be non-negative')
+    cfg.update(micro_batch_size=args.micro_batch_size,
+               eval_micro_batch_size=args.eval_micro_batch_size)
+    print(f"Training batch={cfg['train_batch_size']}, forward batch="
+          f"{args.micro_batch_size or cfg['train_batch_size']}; "
+          f"evaluation forward batch={args.eval_micro_batch_size or cfg['val_batch_size']}")
+    train_records = json.loads(Path(cfg['train_json_path']).read_text())
+    test_records = json.loads(Path(cfg['test_json_path']).read_text())
+    if {r['video_path'] for r in train_records} & {r['video_path'] for r in test_records}:
+        raise ValueError('Training and evaluation videos overlap')
+    print(f"******* Random seed: {args.seed} *******")
+    print("******* Building models. *******")
+    print(cfg)
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA is required by the current DeMamba training loop')
+    available = torch.cuda.device_count()
+    if max(args.device_ids) >= available:
+        raise ValueError(f'Requested --device-ids {args.device_ids}, but only {available} CUDA device(s) are visible')
+    primary_device = args.device_ids[0]
+    torch.cuda.set_device(primary_device)
+    prepare_run(cfg['save_dir'], cfg, args.seed, args.resume, args.clean)
+    print(f"******* Using CUDA device IDs: {args.device_ids} (primary cuda:{primary_device}) *******")
+    model = util.build_model(
+        cfg['model'],
+        neuron_indices_path=cfg.get('neuron_indices_path'),
+        xclip_model_path=cfg.get('xclip_model_path'),
+        xclip_checkpoint_path=cfg.get('xclip_checkpoint_path'),
     )
-    if args.clean:
-        unexpected = [path.name for path in training_outputs
-                      if not path.is_file() and not path.is_symlink()]
-        if unexpected:
-            raise ValueError(f'Expected training files, found directories: {unexpected}')
-        for path in training_outputs:
-            path.unlink()
-        print(f'Cleaned {len(training_outputs)} training files in {output_dir}')
-    if args.resume:
-        if not state_path.is_file() or not config_path.is_file():
-            raise FileNotFoundError(f'No resumable run in {output_dir}')
-        with config_path.open(encoding='utf-8') as handle:
-            if yaml.safe_load(handle) != run_config:
-                raise ValueError('Resume requires the original training configuration and seed')
-    elif training_outputs and not args.clean:
-        names = ', '.join(path.name for path in training_outputs)
-        raise FileExistsError(f'Training outputs already exist in {output_dir}: {names}; use --resume or --clean')
-    with config_path.open('w', encoding='utf-8') as handle:
-        yaml.safe_dump(run_config, handle, sort_keys=False)
+    model = model.to(torch.device(f'cuda:{primary_device}'))
 
-    # Build the model and optimizer.
-    model = build_model(cfg['model']).cuda()
-    if len(device_ids) > 1:
-        model = torch.nn.DataParallel(model, device_ids=device_ids)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['lr'], weight_decay=1e-8)
+    if cfg['tuning_mode'] == 'lp':
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+
+    if len(args.device_ids) > 1:
+        model = torch.nn.DataParallel(model, device_ids=args.device_ids, output_device=primary_device)
+
+    trainable_parameters = [param for param in model.parameters() if param.requires_grad]
+    if not trainable_parameters:
+        raise RuntimeError("No trainable parameters remain after applying tuning_mode")
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=cfg['lr'], weight_decay=1e-8)
     scheduler = MultiStepLR(optimizer, milestones=[7], gamma=0.3)
-    loss = torch.nn.CrossEntropyLoss()
-    start_epoch, best_epoch, best_score = 0, 0, float('-inf')
+    if cfg['mode'] == 'binary':
+        loss = nn.BCEWithLogitsLoss()
+    else:
+        loss = nn.CrossEntropyLoss()
 
-    # Resume from the last completed epoch.
+    trMaxEpoch = cfg['max_epoch']
+    snapshot_path = cfg['save_dir']
+    if not os.path.exists(snapshot_path):
+        os.makedirs(snapshot_path)
+
+    max_epoch, max_acc = 0, 0
+    start_epoch, history = 0, []
+    pending_training, validation_rng = None, None
+    state_path = Path(snapshot_path) / 'training_state.pth'
     if args.resume:
-        state = torch.load(state_path, map_location='cpu')
-        unwrapped = model.module if isinstance(model, torch.nn.DataParallel) else model
-        unwrapped.load_state_dict(state['model'])
+        state = torch.load(state_path, map_location='cpu', weights_only=False)
+        model.load_state_dict(state['model_state_dict'])
         optimizer.load_state_dict(state['optimizer'])
         scheduler.load_state_dict(state['scheduler'])
-        start_epoch, best_epoch, best_score = state['epoch'], state['best_epoch'], state['best_score']
-        random.setstate(state['python_rng'])
-        np.random.set_state(state['numpy_rng'])
-        torch.set_rng_state(state['torch_rng'])
-        torch.cuda.set_rng_state_all(state['cuda_rng'])
-
-    # Run training and validation.
-    print(f'MSLoc-PG: four_class, SFT, seed={args.seed}, devices={device_ids}')
-    print(f'Effective batch={cfg["train_batch_size"]}, forward batch={micro_batch_size}, '
-          f'workers={cfg["num_workers"]}')
-    for epoch in range(start_epoch, cfg['max_epoch']):
-        print(f'******* Training epoch {epoch + 1}/{cfg["max_epoch"]} *******')
-        train_loader, val_loader, segments = generate_dataset_loader_from_json(cfg)
-        if len(train_loader) == 0 or len(val_loader) == 0:
-            raise ValueError('Empty training or validation loader; check data and batch size')
-        best_epoch, best_score, elapsed = train_one_epoch(
-            cfg, model, loss, scheduler, optimizer, epoch, best_epoch, best_score,
-            train_loader, val_loader, str(output_dir), segments,
-            micro_batch_size=micro_batch_size,
-        )
-        unwrapped = model.module if isinstance(model, torch.nn.DataParallel) else model
-        state = dict(
-            epoch=epoch + 1, best_epoch=best_epoch, best_score=best_score,
-            model=unwrapped.state_dict(), optimizer=optimizer.state_dict(),
-            scheduler=scheduler.state_dict(), python_rng=random.getstate(),
-            numpy_rng=np.random.get_state(), torch_rng=torch.get_rng_state(),
-            cuda_rng=torch.cuda.get_rng_state_all(),
-        )
-        temporary = output_dir / 'training_state.tmp'
-        torch.save(state, temporary)
-        os.replace(temporary, state_path)
-        print(f'Epoch {epoch + 1} completed in {elapsed:.1f}s; best validation Loc_F1={best_score:.4f}')
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='./configs/MSLoc_train.yaml')
-    parser.add_argument('--device-ids', default='0,1,2,3,4,5,6,7')
-    parser.add_argument('--epochs', type=int, default=None)
-    parser.add_argument('--lr', type=float, default=None)
-    parser.add_argument('--train-batch-size', type=int, default=None,
-                        help='Effective batch size per optimizer update across all GPUs')
-    parser.add_argument('--batches-per-epoch', type=int, default=None,
-                        help='Maximum optimizer updates per epoch')
-    parser.add_argument('--micro-batch-size', type=int, default=4,
-                        help='Maximum windows per GPU per forward; accumulate to train_batch_size')
-    parser.add_argument('--val-batch-size', type=int, default=None)
-    parser.add_argument('--val-videos', type=int, default=0,
-                        help='Validate the first N complete videos; 0 uses all videos')
-    parser.add_argument('--num-workers', type=int, default=None)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--resume', action='store_true', help='Resume the last completed epoch')
-    parser.add_argument('--clean', action='store_true', help='Remove this run\'s training outputs')
-    args = parser.parse_args()
-    if args.resume and args.clean:
-        raise ValueError('--resume and --clean are mutually exclusive')
-    if args.val_videos < 0:
-        raise ValueError('--val-videos must be nonnegative')
-
-    # Load the config.
-    with open(args.config, encoding='utf-8') as handle:
-        cfg = yaml.safe_load(handle)
-    for key, value in (
-        ('max_epoch', args.epochs), ('lr', args.lr),
-        ('train_batch_size', args.train_batch_size),
-        ('bath_per_epoch', args.batches_per_epoch),
-        ('val_batch_size', args.val_batch_size), ('num_workers', args.num_workers),
-    ):
-        if value is not None:
-            cfg[key] = value
-    if args.val_videos > 0:
-        cfg['val_videos'] = args.val_videos
+        start_epoch, max_epoch, max_acc = state['next_epoch'], state['best_epoch'], state['best_score']
+        history = state['history']
+        pending_training = state.get('pending_training')
+        validation_rng = state['rng'] if pending_training is not None else None
+        restore_rng(state['rng'])
+        del state
     else:
-        cfg.pop('val_videos', None)
-    if cfg['max_epoch'] <= 0 or cfg['bath_per_epoch'] <= 0:
-        raise ValueError('Epochs and batches per epoch must be positive')
-    if not np.isfinite(cfg['lr']) or cfg['lr'] <= 0:
-        raise ValueError('Learning rate must be positive and finite')
+        save_training_state(snapshot_path, model, optimizer, scheduler, 0, max_epoch, max_acc, history)
 
-    os.environ.setdefault('XCLIP_WEIGHTS_PATH',
-                          '../../MSLoc_assets/DeMamba/pretrained_weights/xclip-base-patch16')
-    train_model(cfg, args)
+    for epochID in range(start_epoch, trMaxEpoch):
+        print("******* Training epoch", str(epochID)," *******")
+        print("******* Building datasets. *******")
+        train_loader, val_loader, test_fake_segments = generate_dataset_loader_from_json(cfg)
+        cache_path = Path(snapshot_path) / 'validation_cache.pth'
+        cfg['_evaluation_cache'] = str(cache_path)
+        if pending_training is None:
+            cache_path.unlink(missing_ok=True)
+        elif validation_rng is not None:
+            # Rebuilding the loaders must not consume the saved validation RNG.
+            restore_rng(validation_rng)
 
+        def checkpoint_before_validation(pending):
+            save_training_state(snapshot_path, model, optimizer, scheduler, epochID,
+                                max_epoch, max_acc, history, pending_training=pending)
 
-if __name__ == '__main__':
-    main()
+        max_epoch, max_acc, epoch_time, train_loss, metrics = train_one_epoch(
+            cfg, model, loss, scheduler, optimizer, epochID, max_epoch, max_acc,
+            train_loader, val_loader, snapshot_path, test_fake_segments,
+            pending_training=pending_training, on_training_complete=checkpoint_before_validation,
+        )
+        history.append(dict(epoch=epochID + 1, train_loss=train_loss, F1Det=metrics['F1Det'],
+                            F1Loc=metrics['F1Loc'], lr=optimizer.param_groups[0]['lr']))
+        save_training_state(snapshot_path, model, optimizer, scheduler, epochID + 1, max_epoch, max_acc, history)
+        cache_path.unlink(missing_ok=True)
+        pending_training, validation_rng = None, None
+        save_json(history, Path(snapshot_path) / 'history.json')
+        plot_history(history, snapshot_path)
+        print("******* Ending epoch", str(epochID)," Time ", str(epoch_time), "*******")

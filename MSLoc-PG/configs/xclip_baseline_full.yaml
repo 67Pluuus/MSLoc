@@ -1,0 +1,23 @@
+model: 'XCLIP_DeMamba_4'
+tuning_mode: 'sft'
+task: 'many2many'
+
+save_dir: '../MSLoc_assets/DeMamba/full/baseline/results'
+xclip_model_path: '../MSLoc_assets/DeMamba/pretrained_weights/xclip-base-patch16'
+
+max_epoch: 10
+bath_per_epoch: 1000
+train_batch_size: 32
+val_batch_size: 32
+num_workers: 32
+lr: 0.000001
+
+train_json_path: '../MSLoc_assets/data/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '../MSLoc_assets/data/Tasle-CoT-10K/annos/test_all_1209_0119.json'
+dataset_base_path: '../MSLoc_assets/DeMamba/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True
+}

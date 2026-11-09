@@ -25,17 +25,17 @@ def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
         A dict mapping video name to {fake_segments, type, ...}.
     """
     video_info_dict = {}
-    
-    for video_item in json_data:
+
+    for video_item in tqdm(json_data, desc="Preparing videos"):
         video_path = video_item["video_path"]
         video_type = video_item["type"]
         duration = video_item["duration"]
         annotations = video_item.get("annotations", [])
-        
+
         # Strip the .mp4 extension and replace path separators with underscores.
         video_name = Path(video_path).stem
         formatted_video_name = video_path[:-4].replace('/', '_')
-        
+
         # Collect fake-segment intervals.
         fake_segments = []
         tool = 'None'
@@ -44,7 +44,7 @@ def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
                 start_time, end_time = ann["segment"]
                 fake_segments.append((start_time, end_time))
                 tool = ann["model"] if (tool in ["None", "Wan2.1"]) else tool
-        
+
         # If no explicit fake segments are listed but the type is fake, use the whole duration.
         if not fake_segments and video_type == "fake":
             fake_segments = [(-1, duration)]
@@ -56,12 +56,12 @@ def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
             "tool": tool,
             "real_fake_segments": [x['segment'] for x in annotations]
         }
-    
+
     return video_info_dict
 
-def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str, 
+def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
                           window_length: float = 1.0, frames_per_window: int = 4,
-                          mode: str = "binary", show_progress: bool = False) -> List[Dict]:
+                          mode: str = "binary") -> List[Dict]:
     """
     Parse JSON data and produce sliding-window samples.
 
@@ -71,44 +71,43 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
         window_length: Window length in seconds.
         frames_per_window: Number of frames sampled per window.
         mode: Classification mode, "binary" or "four_class".
-        show_progress: Display video preparation progress.
 
     Returns:
         A list of window dicts containing frame paths and labels.
     """
     fps = 8  # fixed frame rate
     windows = []
-    
-    for video_item in tqdm(json_data, desc='Preparing video windows', disable=not show_progress):
+
+    for video_item in tqdm(json_data, desc="Preparing videos"):
         video_path = video_item["video_path"]
         video_type = video_item["type"]
         duration = video_item["duration"]
         annotations = video_item.get("annotations", [])
-        
+
         # Build the frame directory path.
         video_name = Path(video_path).stem  # strip .mp4 suffix
         frame_dir = Path(dataset_base_path) / video_path[:-4]
         new_video_name = video_path[:-4].replace('/', '_')
-        
+
         if not frame_dir.exists():
-            warnings.warn(f"Frame directory not found: {frame_dir}")
-            continue
-        
+            raise FileNotFoundError(f"Frame directory not found: {frame_dir}")
+
         # Collect every frame file.
         frame_files = sorted(frame_dir.glob("frame_*.jpg"), key=lambda x: int(x.stem.split('_')[1]))
         if not frame_files:
-            warnings.warn(f"No frame files found in: {frame_dir}")
-            continue
-        
+            raise FileNotFoundError(f"No frame files found in: {frame_dir}")
+
         # Total frames and per-frame duration.
         total_frames = len(frame_files)
+        if [int(path.stem.split('_')[1]) for path in frame_files] != list(range(1, total_frames + 1)):
+            raise ValueError(f'Non-contiguous extracted frame sequence: {frame_dir}')
         frame_duration = 1.0 / fps  # seconds per frame
-        
+
         # Number of sliding windows.
         num_windows = int(duration // window_length)
         if duration % window_length > 0:
             num_windows += 1
-        
+
         # Time intervals of fake segments.
         fake_segments = []
         for ann in annotations:
@@ -117,19 +116,19 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
                 fake_segments.append((start_time, end_time))
         if fake_segments == []:
             fake_segments = [(-1, duration)]
-        
+
         # Generate windows.
         for window_idx in range(num_windows):
             window_start_time = window_idx * window_length
             window_end_time = min((window_idx + 1) * window_length, duration)
-            
+
             # Frame range of the current window.
             start_frame_idx = int(window_start_time * fps)
             end_frame_idx = min(int(window_end_time * fps), total_frames - 1)
-            
+
             if start_frame_idx >= total_frames:
-                continue
-                
+                raise ValueError(f'Frames do not cover window {window_idx}: {frame_dir}')
+
             # Sample frames uniformly within the window.
             frame_indices = []
             if end_frame_idx - start_frame_idx + 1 >= frames_per_window:
@@ -142,24 +141,35 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
                 while len(frame_indices) < frames_per_window:
                     frame_indices.append(frame_indices[-1])
                 frame_indices = frame_indices[:frames_per_window]
-            
+
             # Resolve frame paths.
             frame_paths = []
+            frame_times = []
             for frame_idx in frame_indices:
                 if frame_idx < len(frame_files):
-                    frame_paths.append(str(frame_files[frame_idx]))
+                    frame_path = frame_files[frame_idx]
                 else:
                     # Out of range -> use the last frame.
-                    frame_paths.append(str(frame_files[-1]))
-            
+                    frame_path = frame_files[-1]
+                frame_paths.append(str(frame_path))
+                # Extracted frame numbering is one-based: frame_1.jpg is t=0.
+                frame_number = int(frame_path.stem.rsplit('_', 1)[1])
+                frame_times.append((frame_number - 1) / fps)
+
             # Window label.
             if mode == "binary":
-                label = determine_binary_label(window_start_time, window_end_time, 
+                label = determine_binary_label(window_start_time, window_end_time,
                                              fake_segments, video_type)
             else:  # four_class
-                label = determine_four_class_label(window_start_time, window_end_time, 
+                label = determine_four_class_label(window_start_time, window_end_time,
                                                   fake_segments, video_type)
-            
+                # A short fake interval can put both of its boundaries in one
+                # window (real -> fake -> real).  It is not representable by
+                # the four-class target and must not receive an arbitrary
+                # directional label.
+                if label is None:
+                    continue
+
             window_info = {
                 "window_id": f"{new_video_name}_window_{window_idx}",
                 "video_name": new_video_name,
@@ -167,6 +177,8 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
                 "start_time": window_start_time,
                 "end_time": window_end_time,
                 "frame_paths": frame_paths,
+                "frame_times": frame_times,
+                "frame_labels": determine_frame_labels(frame_times, fake_segments, video_type),
                 "label": label,
                 "original_type": video_type
             }
@@ -174,25 +186,34 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
     return windows
 
 
-def determine_binary_label(window_start: float, window_end: float, 
-                          fake_segments: List[Tuple[float, float]], 
+def determine_binary_label(window_start: float, window_end: float,
+                          fake_segments: List[Tuple[float, float]],
                           video_type: str) -> int:
     """
     Compute the binary label for a window.
     """
     if video_type == "real":
         return 0  # real
-    
+
     # Mark as fake if the window overlaps with any fake segment.
     for seg_start, seg_end in fake_segments:
         if not (window_end <= seg_start or window_start >= seg_end):
             return 1  # fake
-    
+
     return 0  # real
 
 
-def determine_four_class_label(window_start: float, window_end: float, 
-                              fake_segments: List[Tuple[float, float]], 
+def determine_frame_labels(frame_times: List[float], fake_segments: List[Tuple[float, float]],
+                           video_type: str) -> List[int]:
+    """Return exact per-sampled-frame fake labels using half-open segments."""
+    if video_type == "real":
+        return [0] * len(frame_times)
+    return [int(any(start <= timestamp < end for start, end in fake_segments))
+            for timestamp in frame_times]
+
+
+def determine_four_class_label(window_start: float, window_end: float,
+                              fake_segments: List[Tuple[float, float]],
                               video_type: str) -> int:
     """
     Compute the four-class label for a window.
@@ -200,20 +221,20 @@ def determine_four_class_label(window_start: float, window_end: float,
     """
     if video_type == "real":
         return 0  # real
-    
+
     # Compute how much of the window overlaps with fake segments.
     window_fake_ratio = 0.0
     fake_duration_in_window = 0.0
     window_duration = window_end - window_start
-    
+
     for seg_start, seg_end in fake_segments:
         overlap_start = max(window_start, seg_start)
         overlap_end = min(window_end, seg_end)
         if overlap_start < overlap_end:
             fake_duration_in_window += (overlap_end - overlap_start)
-    
+
     window_fake_ratio = fake_duration_in_window / window_duration
-    
+
     # Decide which label to use.
     if window_fake_ratio == 0.0:
         return 0  # real
@@ -252,8 +273,24 @@ def crop_center_by_percentage(image, percentage):
     return cropped_image
 
 
+def normalization_params(transform_config: Dict) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """Return preprocessing statistics selected by the experiment config.
+
+    Frozen ``microsoft/xclip-base-patch16`` should receive CLIP-normalised
+    pixels.  Keep ImageNet statistics as the legacy default so existing
+    DeMamba checkpoints remain reproducible.
+    """
+    normalization = transform_config.get("normalization", "imagenet").lower()
+    if normalization in {"clip", "xclip"}:
+        return (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
+    if normalization == "imagenet":
+        return (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+    raise ValueError(f"Unsupported normalization: {normalization!r}")
+
+
 class VideoWindowDatasetTrain(Dataset):
-    def __init__(self, windows: List[Dict], mode: str = "binary", transform_config: Dict = None):
+    def __init__(self, windows: List[Dict], mode: str = "binary", transform_config: Dict = None,
+                 frame_level: bool = False):
         """
         Train-time video-window dataset (with balanced sampling).
 
@@ -264,21 +301,30 @@ class VideoWindowDatasetTrain(Dataset):
         """
         self.windows = windows
         self.mode = mode
+        self.frame_level = frame_level
         self.transform_config = transform_config or {}
-        
+
         # Number of classes is determined by the mode.
         self.num_classes = 2 if mode == "binary" else 4
-        
+
         # Balanced sampling.
         self._balance_samples()
-    
+
     def _balance_samples(self):
         """Balance positive and negative samples."""
+        if self.frame_level:
+            positive_indices = [i for i, w in enumerate(self.windows) if any(w['frame_labels'])]
+            negative_indices = [i for i, w in enumerate(self.windows) if not any(w['frame_labels'])]
+            min_samples = min(len(positive_indices), len(negative_indices))
+            self.balanced_indices = (random.sample(positive_indices, min_samples) +
+                                     random.sample(negative_indices, min_samples))
+            random.shuffle(self.balanced_indices)
+            return
         if self.mode == "binary":
             # Binary balancing.
             positive_indices = [i for i, w in enumerate(self.windows) if w['label'] == 1]
             negative_indices = [i for i, w in enumerate(self.windows) if w['label'] == 0]
-            
+
             min_samples = min(len(positive_indices), len(negative_indices))
             self.balanced_indices = []
             self.balanced_indices.extend(random.sample(positive_indices, min_samples))
@@ -288,30 +334,30 @@ class VideoWindowDatasetTrain(Dataset):
             class_indices = {0: [], 1: [], 2: [], 3: []}
             for i, w in enumerate(self.windows):
                 class_indices[w['label']].append(i)
-            
+
             min_samples = min(len(indices) for indices in class_indices.values())
             self.balanced_indices = []
             self.balanced_indices.extend(random.sample(class_indices[0], min(len(class_indices[0]), len(class_indices[1])+len(class_indices[2])+len(class_indices[3]))))
             self.balanced_indices.extend(random.sample(class_indices[1], len(class_indices[1])))
             self.balanced_indices.extend(random.sample(class_indices[2], len(class_indices[2])))
             self.balanced_indices.extend(random.sample(class_indices[3], len(class_indices[3])))
-        
+
         random.shuffle(self.balanced_indices)
-    
+
     def __len__(self):
         return len(self.balanced_indices)
-    
+
     def __getitem__(self, idx):
         real_idx = self.balanced_indices[idx]
         window_info = self.windows[real_idx]
-        
+
         frame_paths = window_info['frame_paths']
         label = window_info['label']
         select_frame_nums = len(frame_paths)
-        
+
         # Build augmentation pipeline.
         aug_list = [albumentations.Resize(224, 224)]
-        
+
         # Train-time augmentations.
         if random.random() < 0.5:
             aug_list.append(albumentations.HorizontalFlip(p=1.0))
@@ -324,58 +370,44 @@ class VideoWindowDatasetTrain(Dataset):
             aug_list.append(albumentations.GaussianBlur(blur_limit=(3, 5), p=1.0))
         if random.random() < 0.001:
             aug_list.append(albumentations.ToGray(p=1.0))
-        
-        aug_list.append(albumentations.Normalize(mean=(0.485, 0.456, 0.406), 
-                                               std=(0.229, 0.224, 0.225), 
+
+        norm_mean, norm_std = normalization_params(self.transform_config)
+        aug_list.append(albumentations.Normalize(mean=norm_mean,
+                                               std=norm_std,
                                                max_pixel_value=255.0, p=1.0))
         trans = albumentations.Compose(aug_list)
-        
+
         # Read and preprocess frames.
         frames = []
         valid_frames = 0
-        
+
         for frame_path in frame_paths:
-            try:
-                if os.path.exists(frame_path):
-                    image = cv2.imread(frame_path)
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    
-                    # Apply optional center-crop.
-                    if self.transform_config.get('crop_youku', False) and 'youku' in frame_path:
-                        image = crop_center_by_percentage(image, 0.15)
-                    
-                    augmented = trans(image=image)
-                    image = augmented["image"]
-                    frames.append(image.transpose(2, 0, 1)[np.newaxis, :])
-                    valid_frames += 1
-                else:
-                    # Missing frame -> zero padding.
-                    frames.append(np.zeros((3, 224, 224))[np.newaxis, :])
-            except Exception as e:
-                warnings.warn(f"Error loading frame {frame_path}: {e}")
-                frames.append(np.zeros((3, 224, 224))[np.newaxis, :])
-        
-        # Pad if fewer than the requested number of frames are available.
-        if valid_frames < select_frame_nums:
-            pad_num = select_frame_nums - valid_frames
-            for i in range(pad_num):
-                frames.append(np.zeros((3, 224, 224))[np.newaxis, :])
-        
+            image = cv2.imread(frame_path)
+            if image is None:
+                raise ValueError(f'Missing or unreadable frame: {frame_path}')
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            if self.transform_config.get('crop_youku', False) and 'youku' in frame_path:
+                image = crop_center_by_percentage(image, 0.15)
+            augmented = trans(image=image)
+            image = augmented['image']
+            frames.append(image.transpose(2, 0, 1)[np.newaxis, :])
         # Build the label.
         label_onehot = [0] * self.num_classes
         label_onehot[label] = 1
-        
+
         # Convert to tensors.
         frames = np.concatenate(frames, 0)
         frames = torch.tensor(frames[np.newaxis, :])
         label_onehot = torch.FloatTensor(label_onehot)
         binary_label = torch.FloatTensor([label])
-        
+        if self.frame_level:
+            return real_idx, frames, torch.FloatTensor(window_info['frame_labels'])
         return real_idx, frames, label_onehot, binary_label
 
 
 class VideoWindowDatasetTest(Dataset):
-    def __init__(self, windows: List[Dict], mode: str = "binary", transform_config: Dict = None, task: str = "normal"):
+    def __init__(self, windows: List[Dict], mode: str = "binary", transform_config: Dict = None, task: str = "normal",
+                 frame_level: bool = False):
         """
         Test-time video-window dataset (no balanced sampling; evaluate all samples).
 
@@ -389,89 +421,65 @@ class VideoWindowDatasetTest(Dataset):
         self.mode = mode
         self.transform_config = transform_config or {}
         self.task = task
-        
+        self.frame_level = frame_level
+
         # Number of classes is determined by the mode.
         self.num_classes = 2 if mode == "binary" else 4
-        
+
         # Use every sample at test time (no balancing).
         self.indices = list(range(len(windows)))
-    
+
     def __len__(self):
         return len(self.indices)
-    
+
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
         window_info = self.windows[real_idx]
-        
+
         frame_paths = window_info['frame_paths']
         label = window_info['label']
         video_name = window_info['video_name']
         window_idx = window_info['window_idx']
         select_frame_nums = len(frame_paths)
-        
+
         # Build the augmentation pipeline (no random augmentations at test time).
         aug_list = [albumentations.Resize(224, 224)]
-        
-        aug_list.append(albumentations.Normalize(mean=(0.485, 0.456, 0.406), 
-                                               std=(0.229, 0.224, 0.225), 
+
+        norm_mean, norm_std = normalization_params(self.transform_config)
+        aug_list.append(albumentations.Normalize(mean=norm_mean,
+                                               std=norm_std,
                                                max_pixel_value=255.0, p=1.0))
         trans = albumentations.Compose(aug_list)
-        
+
         # Read and preprocess frames.
         frames = []
         valid_frames = 0
-        
+
         for frame_path in frame_paths:
-            try:
-                if os.path.exists(frame_path):
-                    image = cv2.imread(frame_path)
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    
-                    # Apply optional center-crop.
-                    if self.transform_config.get('crop_youku', False) and 'youku' in frame_path:
-                        image = crop_center_by_percentage(image, 0.15)
-                    
-                    augmented = trans(image=image)
-                    image = augmented["image"]
-                    frames.append(image.transpose(2, 0, 1)[np.newaxis, :])
-                    valid_frames += 1
-                else:
-                    # Missing frame -> zero padding.
-                    frames.append(np.zeros((3, 224, 224))[np.newaxis, :])
-            except Exception as e:
-                warnings.warn(f"Error loading frame {frame_path}: {e}")
-                frames.append(np.zeros((3, 224, 224))[np.newaxis, :])
-        
-        # Pad if fewer than the requested number of frames are available.
-        if valid_frames < select_frame_nums:
-            pad_num = select_frame_nums - valid_frames
-            for i in range(pad_num):
-                frames.append(np.zeros((3, 224, 224))[np.newaxis, :])
-        
+            image = cv2.imread(frame_path)
+            if image is None:
+                raise ValueError(f'Missing or unreadable frame: {frame_path}')
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            if self.transform_config.get('crop_youku', False) and 'youku' in frame_path:
+                image = crop_center_by_percentage(image, 0.15)
+            augmented = trans(image=image)
+            image = augmented['image']
+            frames.append(image.transpose(2, 0, 1)[np.newaxis, :])
         # Build the label.
         label_onehot = [0] * self.num_classes
         label_onehot[label] = 1
-        
+
         # Convert to tensors.
         frames = np.concatenate(frames, 0)
         frames = torch.tensor(frames[np.newaxis, :])
         label_onehot = torch.FloatTensor(label_onehot)
         binary_label = torch.FloatTensor([label])
+        if self.frame_level:
+            return window_idx, frames, torch.FloatTensor(window_info['frame_labels']), video_name
         return window_idx, frames, label_onehot, binary_label, video_name
 
 
-def select_video_records(records, limit=0):
-    """Select the first N complete videos; zero keeps every record."""
-    if limit < 0:
-        raise ValueError('Video limit must be nonnegative')
-    if limit == 0:
-        return records
-    video_paths = list(dict.fromkeys(item['video_path'] for item in records))
-    selected_paths = set(video_paths[:limit])
-    return [item for item in records if item['video_path'] in selected_paths]
-
-
-def generate_dataset_loader_from_json(cfg, include_train=True):
+def generate_dataset_loader_from_json(cfg, test_json_path=None):
     """
     Build train / test data loaders from JSON annotation files.
 
@@ -485,70 +493,67 @@ def generate_dataset_loader_from_json(cfg, include_train=True):
             - mode:               Classification mode.
             - task:               Task type.
             - other training-related parameters.
+        test_json_path: Optional annotation override for the evaluation loader.
+            This lets training use ``val_json_path`` while the standalone
+            evaluator uses the held-out ``test_json_path``.
     """
     # Load JSON files.
-    if include_train:
-        with open(cfg['train_json_path'], 'r') as f:
-            train_json = json.load(f)
-    with open(cfg['test_json_path'], 'r') as f:
+    with open(cfg['train_json_path'], 'r') as f:
+        train_json = json.load(f)
+    evaluation_json_path = test_json_path or cfg['test_json_path']
+    with open(evaluation_json_path, 'r') as f:
         test_json = json.load(f)
 
-    # Keep complete videos so localization metrics never use truncated windows.
-    val_videos = cfg.get('val_videos', 0)
-    total_videos = len({item['video_path'] for item in test_json})
-    test_json = select_video_records(test_json, val_videos)
-    if val_videos > 0:
-        selected_count = len({item['video_path'] for item in test_json})
-        print(f'Validation videos: {selected_count}/{total_videos} (limit={val_videos})')
-    
+    if cfg.get('train_videos', 0):
+        train_json = train_json[:cfg['train_videos']]
+    if cfg.get('val_videos', 0):
+        test_json = test_json[:cfg['val_videos']]
+    if not train_json or not test_json:
+        raise ValueError('Empty training or evaluation annotations')
     # Convert to per-window samples.
-    if include_train:
-        train_windows = parse_json_to_windows(
-            train_json,
-            cfg['dataset_base_path'],
-            cfg.get('window_length', 1.0),
-            cfg.get('frames_per_window', 4),
-            cfg.get('mode', 'binary'),
-            show_progress=cfg.get('show_progress', False)
-        )
-    
+    train_windows = parse_json_to_windows(
+        train_json,
+        cfg['dataset_base_path'],
+        cfg.get('window_length', 1.0),
+        cfg.get('frames_per_window', 4),
+        cfg.get('mode', 'binary')
+    )
+
     test_windows = parse_json_to_windows(
         test_json,
         cfg['dataset_base_path'],
         cfg.get('window_length', 1.0),
         cfg.get('frames_per_window', 4),
-        cfg.get('mode', 'binary'),
-        show_progress=cfg.get('show_progress', False)
+        cfg.get('mode', 'binary')
     )
     test_fake_segments = get_video_fake_segments(test_json)
-    
+
     # Build datasets.
-    if include_train:
-        train_dataset = VideoWindowDatasetTrain(
-            train_windows,
-            mode=cfg.get('mode', 'binary'),
-            transform_config=cfg.get('transform_config', {})
-        )
-    
+    train_dataset = VideoWindowDatasetTrain(
+        train_windows,
+        mode=cfg.get('mode', 'binary'),
+        transform_config=cfg.get('transform_config', {}),
+        frame_level=cfg.get('frame_level', False),
+    )
+
     test_dataset = VideoWindowDatasetTest(
         test_windows,
         mode=cfg.get('mode', 'binary'),
         transform_config=cfg.get('transform_config', {}),
-        task=cfg.get('task', 'normal')
+        task=cfg.get('task', 'normal'),
+        frame_level=cfg.get('frame_level', False),
     )
-    
+
     # Build dataloaders.
-    train_loader = None
-    if include_train:
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=cfg['train_batch_size'],
-            shuffle=True,
-            num_workers=cfg['num_workers'],
-            pin_memory=True,
-            drop_last=True
-        )
-    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg['train_batch_size'],
+        shuffle=True,
+        num_workers=cfg['num_workers'],
+        pin_memory=True,
+        drop_last=True
+    )
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=cfg['val_batch_size'],
@@ -559,11 +564,7 @@ def generate_dataset_loader_from_json(cfg, include_train=True):
     )
 
 
-    
-    if include_train:
-        print(f"******* Training Windows: {len(train_windows)} -> Balanced: {len(train_dataset)}")
-    else:
-        print(f"******* Evaluation Windows: {len(test_dataset)}")
-    
-    return train_loader, test_loader, test_fake_segments
 
+    print(f"******* Training Windows: {len(train_windows)} -> Balanced: {len(train_dataset)}")
+
+    return train_loader, test_loader, test_fake_segments

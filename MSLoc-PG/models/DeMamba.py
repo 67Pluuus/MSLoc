@@ -1,4 +1,5 @@
 from transformers import XCLIPVisionModel
+import json
 import os
 import sys
 import numpy as np
@@ -63,7 +64,7 @@ class ResidualBlock(nn.Module):
 
         output = self.drop_path(self.mixer(self.norm(x))) + x
         return output
-    
+
     def step(self, x, cache):
         # x : (B, D)
         # cache : (h, inputs)
@@ -86,11 +87,11 @@ class MambaBlock(nn.Module):
         # projects block input from D to 2*ED (two branches)
         self.in_proj = nn.Linear(config.d_model, 2 * config.d_inner, bias=config.bias)
 
-        self.conv1d = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner, 
-                              kernel_size=config.d_conv, bias=config.conv_bias, 
+        self.conv1d = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner,
+                              kernel_size=config.d_conv, bias=config.conv_bias,
                               groups=config.d_inner,
                               padding=config.d_conv - 1)
-        
+
         # projects x to input-dependent Δ, B, C
         self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False)
 
@@ -106,7 +107,7 @@ class MambaBlock(nn.Module):
             nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
         else:
             raise NotImplementedError
-        
+
         # dt bias
         dt = torch.exp(
             torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(config.dt_min)
@@ -129,8 +130,8 @@ class MambaBlock(nn.Module):
             A_b = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
             self.A_b_log = nn.Parameter(torch.log(A_b))
 
-            self.conv1d_b = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner, 
-                              kernel_size=config.d_conv, bias=config.conv_bias, 
+            self.conv1d_b = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner,
+                              kernel_size=config.d_conv, bias=config.conv_bias,
                               groups=config.d_inner,
                               padding=config.d_conv - 1)
 
@@ -140,7 +141,7 @@ class MambaBlock(nn.Module):
 
     def forward(self, x):
         # x : (B, L, D)
-        
+
         # y : (B, L, D)
 
         _, L, _ = x.shape
@@ -163,7 +164,7 @@ class MambaBlock(nn.Module):
         output = self.out_proj(output) # (B, L, D)
 
         return output
-    
+
     def ssm(self, x):
         # x : (B, L, ED)
 
@@ -197,7 +198,7 @@ class MambaBlock(nn.Module):
             y_b = y_b.flip([-1])
             y = y + y_b
         return y
-    
+
     def selective_scan(self, x, delta, A, B, C, D):
         # x : (B, L, ED)
         # Δ : (B, L, ED)
@@ -212,7 +213,7 @@ class MambaBlock(nn.Module):
         deltaB = delta.unsqueeze(-1) * B.unsqueeze(2) # (B, L, ED, N)
 
         BX = deltaB * (x.unsqueeze(-1)) # (B, L, ED, N)
-        
+
         hs = pscan(deltaA, BX)
 
         y = (hs @ C.unsqueeze(-1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
@@ -220,7 +221,7 @@ class MambaBlock(nn.Module):
         y = y + D * x
 
         return y
-    
+
     def selective_scan_seq(self, x, delta, A, B, C, D):
         # x : (B, L, ED)
         # Δ : (B, L, ED)
@@ -244,7 +245,7 @@ class MambaBlock(nn.Module):
         for t in range(0, L):
             h = deltaA[:, t] * h + BX[:, t]
             hs.append(h)
-            
+
         hs = torch.stack(hs, dim=1) # (B, L, ED, N)
 
         y = (hs @ C.unsqueeze(-1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
@@ -252,7 +253,7 @@ class MambaBlock(nn.Module):
         y = y + D * x
 
         return y
-    
+
     # -------------------------- inference -------------------------- #
     """
     Concerning auto-regressive inference
@@ -274,18 +275,18 @@ class MambaBlock(nn.Module):
 
     As we need one such cache variable per layer, we store a caches object, which is simply a list of cache object. (See mamba_lm.py)
     """
-    
+
     def step(self, x, cache):
         # x : (B, D)
         # cache : (h, inputs)
                 # h : (B, ED, N)
                 # inputs : (B, ED, d_conv-1)
-        
+
         # y : (B, D)
         # cache : (h, inputs)
-        
+
         h, inputs = cache
-        
+
         xz = self.in_proj(x) # (B, 2*ED)
         x, z = xz.chunk(2, dim=1) # (B, ED), (B, ED)
 
@@ -305,7 +306,7 @@ class MambaBlock(nn.Module):
         # prepare cache for next call
         inputs = torch.cat([inputs[:, :, 1:], x_cache], dim=2) # (B, ED, d_conv-1)
         cache = (h, inputs)
-        
+
         return output, cache
 
     def ssm_step(self, x, h):
@@ -375,17 +376,18 @@ def reorder_data(data, N):
 
 class XCLIP_DeMamba(nn.Module):
     def __init__(
-        self, channel_size=768, class_num=1
+        self, channel_size=768, class_num=1, xclip_model_path=None
     ):
         super(XCLIP_DeMamba, self).__init__()
-        # XCLIP backbone weight path. Defaults to MSLoc_assets/DeMamba/pretrained_weights/.
-        # You can also override it via the environment variable XCLIP_WEIGHTS_PATH.
-        _xclip_path = os.environ.get(
-            "XCLIP_WEIGHTS_PATH",
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-                         "MSLoc_assets", "DeMamba", "pretrained_weights", "xclip-base-patch16"),
+        # XCLIP checkpoint path is supplied by config; the sibling asset path is a legacy fallback.
+        _xclip_path = xclip_model_path or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            "MSLoc_assets", "DeMamba", "pretrained_weights", "xclip-base-patch16",
         )
-        self.encoder = XCLIPVisionModel.from_pretrained(_xclip_path)
+        # This project always uses a checkpoint directory supplied locally.
+        # ``local_files_only`` makes a missing/incomplete directory fail fast
+        # instead of silently attempting a Hugging Face download.
+        self.encoder = XCLIPVisionModel.from_pretrained(_xclip_path, local_files_only=True)
         blocks = []
         channel = 768
         self.fusing_ratios = 1
@@ -412,6 +414,12 @@ class XCLIP_DeMamba(nn.Module):
                 init.constant_(m.weight, 1)
                 init.constant_(m.bias, 0)
 
+    def train(self, mode=True):
+        super().train(mode)
+        if not any(parameter.requires_grad for parameter in self.encoder.parameters()):
+            self.encoder.eval()
+        return self
+
     def forward(self, x):
         b, t, _, h, w = x.shape
         images = x.view(b * t, 3, h, w)
@@ -431,7 +439,7 @@ class XCLIP_DeMamba(nn.Module):
         sequence_output = sequence_output.view(b, t, self.fusing_ratios, s, self.fusing_ratios, s, c)
         x = sequence_output.permute(0, 2, 4, 1, 3, 5, 6).contiguous().view(b*s*s, t, -1, c)
         b_l = b*s*s
-        
+
         x = reorder_data(x, self.fusing_ratios)
         x = x.permute(0, 2, 1, 3).contiguous().view(b_l, -1, c)
         res = self.mamba(x)
@@ -445,71 +453,3 @@ class XCLIP_DeMamba(nn.Module):
         pred = self.dropout(pred)
 
         return pred
-
-
-
-class CLIP_DeMamba(nn.Module):
-    def __init__(
-        self, channel_size=512, class_num=1
-    ):
-        super(CLIP_DeMamba, self).__init__()
-        self.clip_model, preprocess = clip.load('ViT-B-14')
-        self.clip_model = self.clip_model.float()
-        blocks = []
-        channel = 512
-        self.fusing_ratios = 2
-        self.patch_nums = (14//self.fusing_ratios)**2
-        self.mamba_configs = MambaConfig(d_model=channel)
-        self.mamba = ResidualBlock(config = self.mamba_configs)
-        self.fc1 = nn.Linear(channel*(self.patch_nums+1), class_num)
-        self.bn1 = nn.BatchNorm1d(channel)
-        self.initialize_weights(self.fc1)
-
-    def initialize_weights(self, module):
-        for m in module.modules():
-            if isinstance(m, nn.Linear):
-                init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Conv2d):
-                init.kaiming_uniform_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        b, t, _, h, w = x.shape
-        images = x.view(b * t, 3, h, w)
-        sequence_output = self.clip_model.encode_image(images)
-        _, _, c = sequence_output.shape
-        sequence_output = sequence_output.view(b, t, -1, c)
-
-        global_feat = sequence_output.reshape(b, -1, c)
-        global_feat = global_feat.mean(1)
-
-        _, _, f_w, _ = sequence_output.shape
-        f_h, f_w = int(math.sqrt(f_w)), int(math.sqrt(f_w))
-
-        s = f_h//self.fusing_ratios
-        sequence_output = sequence_output.view(b, t, self.fusing_ratios, s, self.fusing_ratios, s, c)
-        x = sequence_output.permute(0, 2, 4, 1, 3, 5, 6).contiguous().view(b*s*s, t, -1, c)
-        b_l = b*s*s
-        
-        x = reorder_data(x, self.fusing_ratios)
-        x = x.permute(0, 2, 1, 3).contiguous().view(b_l, -1, c)
-        res = self.mamba(x)
-        video_level_features = res.mean(1)
-        video_level_features = video_level_features.view(b, -1)
-
-        video_level_features = torch.cat((global_feat, video_level_features), dim=1)
-        x = self.fc1(video_level_features)
-
-        return x
-
-if __name__ == '__main__':
-    model = CLIP_DeMamba()
-    print(model)
-
-
